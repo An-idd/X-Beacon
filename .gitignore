@@ -1,0 +1,43 @@
+# Binaries
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# Go build artifacts
+/vendor/
+
+# Coverage / profiling
+*.prof
+coverage.txt
+coverage.html
+
+# Local config (only *.example.yaml is committed)
+/configs/config.yaml
+/configs/*.local.yaml
+/configs/*.local.yml
+.env
+.env.*
+!.env.example
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs / runtime
+*.log
+/tmp/
+/data/
+
+# Claude
+/doc/
+CLAUDE.md
+phase.md
+TODO.md

@@ -1,0 +1,47 @@
+server:
+  addr: ":8080"
+  read_timeout: 10s
+  # write timeout must accommodate slow LLM streams; tune per upstream SLA
+  write_timeout: 600s
+  shutdown_timeout: 30s
+
+log:
+  level: info      # debug | info | warn | error
+  format: json     # json | console
+
+observability:
+  metrics:
+    enabled: true
+    path: /metrics
+  tracing:
+    enabled: false
+    endpoint: ""
+    service_name: x-beacon
+    sample_ratio: 0.1
+
+database:
+  dsn: "postgres://xbeacon:xbeacon@localhost:5432/xbeacon?sslmode=disable"
+  max_open_conns: 20
+  max_idle_conns: 5
+  conn_max_lifetime: 30m
+
+redis:
+  addr: "localhost:6379"
+  password: ""
+  db: 0
+  pool_size: 50
+
+# Provider configuration lives in configs/providers.yaml (loaded separately).
+providers_file: configs/providers.yaml
+
+rate_limits: []
+
+cache:
+  exact:
+    enabled: true
+    ttl: 1h
+  semantic:
+    enabled: false
+    threshold: 0.95
+    embedding_model: text-embedding-3-small
+    top_k: 5

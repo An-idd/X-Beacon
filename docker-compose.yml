@@ -1,0 +1,38 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: xbeacon-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: xbeacon
+      POSTGRES_PASSWORD: xbeacon
+      POSTGRES_DB: xbeacon
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U xbeacon -d xbeacon"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis/redis-stack-server:7.4.0-v0
+    container_name: xbeacon-redis
+    # redis-stack-server bundles RediSearch, which semantic cache needs in Week 9-10.
+    # Plain redis:7-alpine would work for Phase 0/1/2 but require a swap later.
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres_data:
+  redis_data:
