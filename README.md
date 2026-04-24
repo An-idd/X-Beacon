@@ -6,8 +6,8 @@
 
 为使用多家 LLM 服务的团队提供统一接入层，解决成本、可靠性、可观测性三大痛点。
 
-[![Build Status](https://img.shields.io/github/actions/workflow/status/yourname/x-beacon/ci.yml?branch=main)](https://github.com/yourname/x-beacon/actions)
-[![Go Report Card](https://goreportcard.com/badge/github.com/yourname/x-beacon)](https://goreportcard.com/report/github.com/yourname/x-beacon)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/An-idd/x-beacon/ci.yml?branch=main)](https://github.com/An-idd/x-beacon/actions)
+[![Go Report Card](https://goreportcard.com/badge/github.com/An-idd/x-beacon)](https://goreportcard.com/report/github.com/An-idd/x-beacon)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/go-1.22%2B-00ADD8.svg)](https://golang.org)
 
@@ -30,26 +30,31 @@
 ## 核心特性
 
 ### 🌐 统一 API 层
+
 - 兼容 OpenAI API 格式，现有代码几乎零改动即可接入
 - 开箱即用支持 OpenAI、Anthropic、DeepSeek、通义千问、豆包等主流提供商
 - 统一处理流式响应（SSE），屏蔽各家协议差异
 
 ### 🚀 高性能
+
 - 单机 **5000+ QPS**，P99 延迟 **<20ms**（不含模型响应时间）
 - 基于 Go 的高并发实现，连接池 + 流式转发，内存占用 <500MB
 - 异步计费与日志写入，不阻塞请求主路径
 
 ### 💰 成本控制
+
 - **语义缓存**：基于 embedding 相似度的响应缓存，重复类查询成本降低 60%+
 - **精确 token 计数**：内置 tokenizer，提供准确的成本统计（按 key、按用户、按模型）
 - **智能路由**：根据任务复杂度自动选择合适的模型，避免"杀鸡用牛刀"
 
 ### 🛡️ 生产级可靠性
+
 - **多维度限流**：基于令牌桶 + 滑动窗口，支持 user × model × time 组合规则
 - **自动重试 & 降级**：区分可重试错误，供应商故障时自动切换备用
 - **熔断保护**：避免单点故障级联放大
 
 ### 📊 完整可观测性
+
 - Prometheus 指标：QPS、延迟、token 用量、缓存命中率、成本
 - OpenTelemetry 分布式追踪：完整还原单次请求链路
 - 结构化日志（JSON）：易于接入 ELK、Loki
@@ -60,7 +65,7 @@
 ### 通过 Docker Compose 启动（推荐）
 
 ```bash
-git clone https://github.com/yourname/x-beacon.git
+git clone https://github.com/An-idd/x-beacon.git
 cd x-beacon
 cp configs/config.example.yaml configs/config.yaml
 # 编辑 config.yaml，填入你的 OpenAI / Anthropic API key
@@ -68,6 +73,7 @@ docker-compose up -d
 ```
 
 服务启动后访问：
+
 - 网关 API：`http://localhost:8080`
 - 管理面板：`http://localhost:8080/admin`
 - Prometheus 指标：`http://localhost:8080/metrics`
@@ -121,10 +127,10 @@ make build
 
 ```
 ┌─────────────┐      ┌──────────────────────────────────────┐      ┌─────────────┐
-│             │      │            X-BEACON Gateway            │      │   OpenAI    │
+│             │      │            X-BEACON Gateway          │      │   OpenAI    │
 │   Client    │─────▶│                                      │─────▶│             │
 │  (SDK/API)  │      │  ┌────────────────────────────────┐  │      ├─────────────┤
-│             │      │  │  Auth → RateLimit → Cache →   │  │      │  Anthropic  │
+│             │      │  │  Auth → RateLimit → Cache →    │  │      │  Anthropic  │
 └─────────────┘      │  │  Router → Provider → Billing   │  │─────▶│             │
                      │  └────────────────────────────────┘  │      ├─────────────┤
                      │                  │                   │      │  DeepSeek   │
@@ -142,20 +148,22 @@ make build
 
 在 AWS c6i.xlarge（4 vCPU, 8GB RAM）上的压测结果：
 
-| 场景 | QPS | P50 延迟 | P99 延迟 | 说明 |
-|------|-----|----------|----------|------|
-| 空请求（仅网关转发） | 8,200 | 1.2ms | 4.8ms | 不含模型响应 |
-| 精确缓存命中 | 12,500 | 0.8ms | 3.2ms | Redis 缓存 |
-| 语义缓存命中 | 3,800 | 4.5ms | 15ms | 含 embedding 计算 |
-| 限流检查 | 7,500 | 1.5ms | 6ms | 分布式限流 |
+
+| 场景                 | QPS    | P50 延迟 | P99 延迟 | 说明              |
+| -------------------- | ------ | -------- | -------- | ----------------- |
+| 空请求（仅网关转发） | 8,200  | 1.2ms    | 4.8ms    | 不含模型响应      |
+| 精确缓存命中         | 12,500 | 0.8ms    | 3.2ms    | Redis 缓存        |
+| 语义缓存命中         | 3,800  | 4.5ms    | 15ms     | 含 embedding 计算 |
+| 限流检查             | 7,500  | 1.5ms    | 6ms      | 分布式限流        |
 
 与同类项目对比：
 
-| 项目 | 语言 | 空请求 P99 | 内存占用 | 语义缓存 |
-|------|------|-----------|---------|---------|
-| **X-BEACON** | **Go** | **4.8ms** | **380MB** | **✅** |
-| LiteLLM | Python | ~80ms | ~1.2GB | ❌ |
-| OneAPI | Go | ~15ms | ~500MB | ❌ |
+
+| 项目         | 语言   | 空请求 P99 | 内存占用  | 语义缓存 |
+| ------------ | ------ | ---------- | --------- | -------- |
+| **X-BEACON** | **Go** | **4.8ms**  | **380MB** | **✅**   |
+| LiteLLM      | Python | ~80ms      | ~1.2GB    | ❌       |
+| OneAPI       | Go     | ~15ms      | ~500MB    | ❌       |
 
 完整基准测试方法和数据见 [benchmarks.md](docs/benchmarks.md)。
 
@@ -176,31 +184,35 @@ make build
 ## 路线图
 
 ### ✅ 已完成（v0.1 - MVP）
-- [x] 统一 API 层（兼容 OpenAI 格式）
-- [x] 支持 OpenAI、Anthropic、DeepSeek 三家 provider
-- [x] 流式响应（SSE）
-- [x] API key 管理
-- [x] 基础可观测性
+
+- [X]  统一 API 层（兼容 OpenAI 格式）
+- [X]  支持 OpenAI、Anthropic、DeepSeek 三家 provider
+- [X]  流式响应（SSE）
+- [X]  API key 管理
+- [X]  基础可观测性
 
 ### 🚧 进行中（v0.2 - 企业级特性）
-- [ ] 分布式限流（Redis 实现）
-- [ ] 自动重试与降级
-- [ ] 熔断器
-- [ ] Token 精确计数与成本统计
-- [ ] Prometheus 指标完善
+
+- [ ]  分布式限流（Redis 实现）
+- [ ]  自动重试与降级
+- [ ]  熔断器
+- [ ]  Token 精确计数与成本统计
+- [ ]  Prometheus 指标完善
 
 ### 📋 计划中（v0.3 - 差异化亮点）
-- [ ] 语义缓存（HNSW 索引）
-- [ ] 智能路由（任务复杂度识别）
-- [ ] Prompt 优化（自动压缩、上下文裁剪）
-- [ ] 管理面板（Web UI）
-- [ ] 多租户隔离
+
+- [ ]  语义缓存（HNSW 索引）
+- [ ]  智能路由（任务复杂度识别）
+- [ ]  Prompt 优化（自动压缩、上下文裁剪）
+- [ ]  管理面板（Web UI）
+- [ ]  多租户隔离
 
 ### 💭 探索中
-- [ ] 支持更多 provider（文心、Kimi、Gemini）
-- [ ] 支持 function calling 标准化
-- [ ] 支持多模态（图片、音频）
-- [ ] Python SDK
+
+- [ ]  支持更多 provider（文心、Kimi、Gemini）
+- [ ]  支持 function calling 标准化
+- [ ]  支持多模态（图片、音频）
+- [ ]  Python SDK
 
 ## 文档
 
@@ -231,7 +243,7 @@ make build
 
 欢迎 PR！请先阅读 [贡献指南](CONTRIBUTING.md)。
 
-遇到问题请在 [Issues](https://github.com/yourname/x-beacon/issues) 反馈，或加入我们的 [Discord](#) 社区讨论。
+遇到问题请在 [Issues](https://github.com/An-idd/x-beacon/issues) 反馈，或加入我们的 [Discord](#) 社区讨论。
 
 ## 协议
 

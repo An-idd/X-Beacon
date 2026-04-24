@@ -68,6 +68,11 @@ func run() error {
 
 	metricsReg := observability.NewMetricsRegistry()
 
+	reg, err := loadRegistry(cfg.ProvidersFile, logger)
+	if err != nil {
+		return fmt.Errorf("init provider registry: %w", err)
+	}
+
 	tp, shutdownTracing, err := observability.NewTracerProvider(ctx, observability.TracingConfig{
 		Enabled:     cfg.Observability.Tracing.Enabled,
 		Endpoint:    cfg.Observability.Tracing.Endpoint,
@@ -91,6 +96,7 @@ func run() error {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
 	})
+	r.Get("/v1/models", modelsHandler(reg))
 	if cfg.Observability.Metrics.Enabled {
 		r.Handle(cfg.Observability.Metrics.Path, promhttp.HandlerFor(metricsReg, promhttp.HandlerOpts{Registry: metricsReg}))
 	}

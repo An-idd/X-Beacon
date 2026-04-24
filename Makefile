@@ -38,6 +38,9 @@ run: dev ## Alias for `dev`
 configs/config.yaml:
 	@cp configs/config.example.yaml $@ && echo "created $@ from example — edit before real use"
 
+configs/providers.yaml:
+	@cp configs/providers.example.yaml $@ && echo "created $@ from example — set OPENAI_API_KEY and edit before real use"
+
 .PHONY: test
 test: ## Unit tests
 	$(GO) test $(GOFLAGS) -count=1 $(PKGS)

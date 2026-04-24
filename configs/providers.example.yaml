@@ -1,0 +1,39 @@
+providers:
+  - name: openai-primary
+    type: openai
+    endpoint: https://api.openai.com
+    api_key: ${OPENAI_API_KEY}
+    organization: ${OPENAI_ORG:-}
+    timeout: 60s
+    priority: 10
+    models:
+      exact:
+        - gpt-4o
+        - gpt-4o-mini
+      glob:
+        - gpt-4-*
+        - gpt-3.5-*
+
+  # Uncomment when an Azure OpenAI deployment is available.
+  # - name: azure-openai
+  #   type: openai
+  #   endpoint: https://my-resource.openai.azure.com
+  #   api_key: ${AZURE_OPENAI_KEY}
+  #   timeout: 60s
+  #   models:
+  #     exact:
+  #       - gpt-4o-azure
+  #     glob:
+  #       - gpt-4-*
+
+  # DeepSeek is OpenAI-compatible; reuse the openai adapter.
+  # - name: deepseek
+  #   type: openai
+  #   endpoint: https://api.deepseek.com
+  #   api_key: ${DEEPSEEK_API_KEY}
+  #   models:
+  #     exact:
+  #       - deepseek-chat
+  #       - deepseek-reasoner
+
+default_provider: openai-primary
