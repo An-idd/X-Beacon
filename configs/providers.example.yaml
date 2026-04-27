@@ -1,3 +1,10 @@
+# Provider catalog template. Copy to providers.yaml (or let `make dev`
+# do it for you) and ensure the referenced env vars are set before
+# launching the gateway.
+#
+# All three adapters are enabled by default; comment out any provider
+# whose API key isn't available.
+
 providers:
   - name: openai-primary
     type: openai
@@ -14,26 +21,28 @@ providers:
         - gpt-4-*
         - gpt-3.5-*
 
-  # Uncomment when an Azure OpenAI deployment is available.
-  # - name: azure-openai
-  #   type: openai
-  #   endpoint: https://my-resource.openai.azure.com
-  #   api_key: ${AZURE_OPENAI_KEY}
-  #   timeout: 60s
-  #   models:
-  #     exact:
-  #       - gpt-4o-azure
-  #     glob:
-  #       - gpt-4-*
+  - name: anthropic-primary
+    type: anthropic
+    endpoint: https://api.anthropic.com
+    api_key: ${ANTHROPIC_API_KEY}
+    timeout: 60s
+    priority: 10
+    models:
+      exact:
+        - claude-3-5-sonnet-20241022
+        - claude-3-5-haiku-20241022
+      glob:
+        - claude-3-*
 
-  # DeepSeek is OpenAI-compatible; reuse the openai adapter.
-  # - name: deepseek
-  #   type: openai
-  #   endpoint: https://api.deepseek.com
-  #   api_key: ${DEEPSEEK_API_KEY}
-  #   models:
-  #     exact:
-  #       - deepseek-chat
-  #       - deepseek-reasoner
+  - name: deepseek-primary
+    type: deepseek
+    endpoint: https://api.deepseek.com
+    api_key: ${DEEPSEEK_API_KEY}
+    timeout: 60s
+    priority: 5
+    models:
+      exact:
+        - deepseek-chat
+        - deepseek-reasoner
 
 default_provider: openai-primary

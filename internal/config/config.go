@@ -21,6 +21,7 @@ type Config struct {
 	Database      DatabaseConfig      `mapstructure:"database"`
 	Redis         RedisConfig         `mapstructure:"redis"`
 	ProvidersFile string              `mapstructure:"providers_file"`
+	AuthFile      string              `mapstructure:"auth_file"`
 	RateLimits    []RateLimitRule     `mapstructure:"rate_limits"`
 	Cache         CacheConfig         `mapstructure:"cache"`
 }
@@ -149,6 +150,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("redis.pool_size", 50)
 
 	v.SetDefault("providers_file", "configs/providers.yaml")
+	v.SetDefault("auth_file", "configs/auth.yaml")
 
 	v.SetDefault("cache.exact.enabled", true)
 	v.SetDefault("cache.exact.ttl", time.Hour)

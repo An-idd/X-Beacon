@@ -34,6 +34,10 @@ redis:
 # Provider configuration lives in configs/providers.yaml (loaded separately).
 providers_file: configs/providers.yaml
 
+# API key table lives in configs/auth.yaml. If absent, /v1/* runs
+# unauthenticated and the gateway logs a warning (dev-mode behavior).
+auth_file: configs/auth.yaml
+
 rate_limits: []
 
 cache:

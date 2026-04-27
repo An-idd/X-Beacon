@@ -12,13 +12,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
 	"go.uber.org/zap"
 
 	"github.com/An-idd/x-beacon/internal/config"
 	"github.com/An-idd/x-beacon/internal/observability"
+	"github.com/An-idd/x-beacon/internal/server"
 )
 
 // Populated at build time via -ldflags (see Makefile).
@@ -29,28 +28,36 @@ var (
 )
 
 func main() {
-	if err := run(); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := runWithCtx(ctx, os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "fatal:", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	var (
-		configPath  string
-		showVersion bool
-	)
-	flag.StringVar(&configPath, "config", "configs/config.yaml", "path to config file")
-	flag.BoolVar(&showVersion, "version", false, "print version and exit")
-	flag.Parse()
+// parseArgs is split out from run so tests can drive the flow without
+// touching the global flag.CommandLine.
+func parseArgs(args []string) (configPath string, showVersion bool, err error) {
+	fs := flag.NewFlagSet("x-beacon", flag.ContinueOnError)
+	fs.StringVar(&configPath, "config", "configs/config.yaml", "path to config file")
+	fs.BoolVar(&showVersion, "version", false, "print version and exit")
+	err = fs.Parse(args)
+	return
+}
 
+// runWithCtx is the testable core of main(): it owns the full startup +
+// shutdown lifecycle but receives ctx and args injected by the caller, so
+// tests can cancel mid-run or supply temporary configs.
+func runWithCtx(ctx context.Context, args []string, stdout *os.File) error {
+	configPath, showVersion, err := parseArgs(args)
+	if err != nil {
+		return err
+	}
 	if showVersion {
-		fmt.Printf("x-beacon %s (commit %s, built %s)\n", version, commit, buildTime)
+		fmt.Fprintf(stdout, "x-beacon %s (commit %s, built %s)\n", version, commit, buildTime)
 		return nil
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -73,11 +80,18 @@ func run() error {
 		return fmt.Errorf("init provider registry: %w", err)
 	}
 
+	authn, err := loadAuth(cfg.AuthFile, logger)
+	if err != nil {
+		return fmt.Errorf("init auth: %w", err)
+	}
+
 	tp, shutdownTracing, err := observability.NewTracerProvider(ctx, observability.TracingConfig{
 		Enabled:     cfg.Observability.Tracing.Enabled,
 		Endpoint:    cfg.Observability.Tracing.Endpoint,
 		ServiceName: cfg.Observability.Tracing.ServiceName,
 		SampleRatio: cfg.Observability.Tracing.SampleRatio,
+		// ServiceName carries through to the Server's Tracing middleware too,
+		// keeping span attribution consistent.
 	})
 	if err != nil {
 		return fmt.Errorf("init tracer: %w", err)
@@ -91,19 +105,22 @@ func run() error {
 		}
 	}()
 
-	r := chi.NewRouter()
-	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok\n"))
+	srv, err := server.New(server.Deps{
+		Logger:         logger,
+		Registry:       reg,
+		Authn:          authn,
+		MetricsReg:     metricsReg,
+		MetricsEnabled: cfg.Observability.Metrics.Enabled,
+		MetricsPath:    cfg.Observability.Metrics.Path,
+		ServiceName:    cfg.Observability.Tracing.ServiceName,
 	})
-	r.Get("/v1/models", modelsHandler(reg))
-	if cfg.Observability.Metrics.Enabled {
-		r.Handle(cfg.Observability.Metrics.Path, promhttp.HandlerFor(metricsReg, promhttp.HandlerOpts{Registry: metricsReg}))
+	if err != nil {
+		return fmt.Errorf("init server: %w", err)
 	}
 
-	srv := &http.Server{
+	httpSrv := &http.Server{
 		Addr:              cfg.Server.Addr,
-		Handler:           r,
+		Handler:           srv.Handler(),
 		ReadTimeout:       cfg.Server.ReadTimeout,
 		ReadHeaderTimeout: cfg.Server.ReadTimeout,
 		WriteTimeout:      cfg.Server.WriteTimeout,
@@ -116,7 +133,7 @@ func run() error {
 			zap.String("version", version),
 			zap.String("commit", commit),
 		)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return
 		}
@@ -135,7 +152,7 @@ func run() error {
 
 	sctx, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
 	defer cancel()
-	if err := srv.Shutdown(sctx); err != nil {
+	if err := httpSrv.Shutdown(sctx); err != nil {
 		return fmt.Errorf("server shutdown: %w", err)
 	}
 	logger.Info("server stopped cleanly")

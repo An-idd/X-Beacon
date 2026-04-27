@@ -251,9 +251,12 @@ providers:
 }
 
 // TestLoad_ExampleFile guards that the committed providers.example.yaml
-// remains loadable end-to-end.
+// remains loadable end-to-end. Step 3.6 enabled all three providers in
+// the template, so all three env vars must be set during this test.
 func TestLoad_ExampleFile(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "sk-test-example")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-test-anthropic")
+	t.Setenv("DEEPSEEK_API_KEY", "sk-test-deepseek")
 	reg, err := Load("../../../configs/providers.example.yaml")
 	require.NoError(t, err)
 	assert.NotEmpty(t, reg.Names())

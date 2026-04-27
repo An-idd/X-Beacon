@@ -9,6 +9,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/An-idd/x-beacon/internal/envexpand"
 	"github.com/An-idd/x-beacon/internal/provider"
 	"github.com/An-idd/x-beacon/internal/provider/anthropic"
 	"github.com/An-idd/x-beacon/internal/provider/deepseek"
@@ -51,7 +52,7 @@ func Load(path string) (*Registry, error) {
 	// Expand env before YAML parsing so ${VAR} inside quoted string values
 	// becomes the expanded text. Structural YAML tokens are not disturbed
 	// because our placeholder syntax (${...}) is not a YAML meta-character.
-	raw = []byte(expandEnv(string(raw)))
+	raw = []byte(envexpand.Expand(string(raw)))
 
 	var pf providersFile
 	if err := yaml.Unmarshal(raw, &pf); err != nil {

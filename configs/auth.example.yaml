@@ -1,0 +1,21 @@
+# Static API key table (Week 3 / Auth v1).
+#
+# Loaded once at startup. Each entry maps a stable, non-secret ID to a
+# secret bearer token (the value clients send as `Authorization: Bearer <secret>`).
+#
+# Use ${VAR} or ${VAR:-default} to inject secrets from the environment;
+# committing real secrets to this file is not supported.
+#
+# Week 4 replaces this static table with a Postgres-backed one. The
+# in-process Authenticator interface stays the same, so client behavior
+# does not change.
+
+keys:
+  - id: dev-local
+    name: "Local development"
+    secret: ${XBEACON_DEV_KEY:-sk-local-dev}
+
+  # Add production / CI keys via env vars; do NOT commit literal secrets.
+  # - id: prod-ci
+  #   name: "CI integration"
+  #   secret: ${XBEACON_PROD_CI_KEY}

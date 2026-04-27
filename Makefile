@@ -29,7 +29,7 @@ build: ## Build the gateway binary into ./bin
 	$(GO) build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/$(BINARY) $(CMD_PATH)
 
 .PHONY: dev
-dev: configs/config.yaml ## Run the gateway locally (reads configs/config.yaml)
+dev: configs/config.yaml configs/auth.yaml ## Run the gateway locally (reads configs/config.yaml)
 	$(GO) run $(CMD_PATH) --config configs/config.yaml
 
 .PHONY: run
@@ -39,7 +39,10 @@ configs/config.yaml:
 	@cp configs/config.example.yaml $@ && echo "created $@ from example — edit before real use"
 
 configs/providers.yaml:
-	@cp configs/providers.example.yaml $@ && echo "created $@ from example — set OPENAI_API_KEY and edit before real use"
+	@cp configs/providers.example.yaml $@ && echo "created $@ from example — set OPENAI_API_KEY/ANTHROPIC_API_KEY/DEEPSEEK_API_KEY before launch"
+
+configs/auth.yaml:
+	@cp configs/auth.example.yaml $@ && echo "created $@ from example — set XBEACON_DEV_KEY (or accept the default sk-local-dev) before launch"
 
 .PHONY: test
 test: ## Unit tests
