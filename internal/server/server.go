@@ -16,6 +16,7 @@ import (
 
 	"github.com/An-idd/x-beacon/internal/auth"
 	"github.com/An-idd/x-beacon/internal/provider/registry"
+	"github.com/An-idd/x-beacon/internal/ratelimit"
 	"github.com/An-idd/x-beacon/internal/server/middleware"
 )
 
@@ -31,6 +32,11 @@ type Deps struct {
 	// early bootstrap (no auth.yaml + dev mode); the server then leaves
 	// /v1/* unauthenticated and logs a warn line at startup.
 	Authn auth.Authenticator
+
+	// RateLimiter enforces configured rules on /v1/* routes (after Auth).
+	// nil/empty Multi → no-op; rate-limit middleware short-circuits and
+	// the chain runs without any per-request rate-limit cost.
+	RateLimiter *ratelimit.Multi
 
 	// ReadinessCheckers feed /readyz. Order is preserved in the JSON body
 	// for stable parsing. nil/empty makes /readyz a trivial 200.
@@ -103,6 +109,9 @@ func New(deps Deps) (*Server, error) {
 			deps.Logger.Warn("auth disabled: /v1/* is unauthenticated",
 				zap.String("hint", "configure auth_file in config.yaml to enable"))
 		}
+		// RateLimit runs AFTER Auth so per-key rules can pluck Principal.
+		// nil/empty Multi short-circuits (no-op middleware).
+		v1.Use(middleware.RateLimit(deps.RateLimiter, deps.Logger))
 		// OpenAI-compatible model catalog. Handler tolerates an empty registry
 		// (returns {"object":"list","data":[]}) so the gateway boots even when
 		// providers.yaml is absent.

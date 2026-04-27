@@ -13,6 +13,7 @@ import (
 	"github.com/An-idd/x-beacon/internal/auth"
 	"github.com/An-idd/x-beacon/internal/config"
 	"github.com/An-idd/x-beacon/internal/provider/registry"
+	"github.com/An-idd/x-beacon/internal/ratelimit"
 	"github.com/An-idd/x-beacon/internal/server"
 	"github.com/An-idd/x-beacon/internal/storage"
 )
@@ -60,6 +61,36 @@ func buildReadinessCheckers(pool *storage.Pool, rdb *redis.Client) []server.Read
 		})
 	}
 	return checkers
+}
+
+// buildRateLimiter translates config.RateLimitRule → ratelimit.RuleConfig
+// and constructs the Multi aggregator. Empty config or build failure
+// returns nil — server treats that as "no rate-limiting" and the
+// middleware short-circuits.
+func buildRateLimiter(cfg *config.Config, rdb redis.UniversalClient, logger *zap.Logger) (*ratelimit.Multi, error) {
+	if len(cfg.RateLimits) == 0 {
+		logger.Info("no rate_limits configured; rate-limit middleware is a no-op")
+		return nil, nil
+	}
+
+	rcs := make([]ratelimit.RuleConfig, len(cfg.RateLimits))
+	for i, r := range cfg.RateLimits {
+		rcs[i] = ratelimit.RuleConfig{
+			Name:      r.Name,
+			Algorithm: r.Algorithm,
+			Rate:      r.Rate,
+			Window:    r.Window,
+			Limit:     r.Limit,
+			Burst:     r.Burst,
+			KeyBy:     r.KeyBy,
+		}
+	}
+	rules, err := ratelimit.Build(rcs, rdb)
+	if err != nil {
+		return nil, err
+	}
+	logger.Info("rate-limit rules loaded", zap.Int("count", len(rules)))
+	return ratelimit.NewMulti(rules...), nil
 }
 
 // loadRedis builds and pings the Redis client used by the auth cache

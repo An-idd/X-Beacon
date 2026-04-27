@@ -101,16 +101,18 @@ type SemanticCacheConfig struct {
 	TopK           int     `mapstructure:"top_k"`
 }
 
-// RateLimitRule is held loosely here; Week 5 fleshes out the full schema.
+// RateLimitRule is one entry in `rate_limits:` of config.yaml. Mirrors
+// the runtime ratelimit.RuleConfig so main can translate without copying
+// per-field; future fields (e.g. Conditions for selector-based rules)
+// extend both.
 type RateLimitRule struct {
-	Name       string            `mapstructure:"name"`
-	Algorithm  string            `mapstructure:"algorithm"`
-	Rate       string            `mapstructure:"rate"`
-	Window     time.Duration     `mapstructure:"window"`
-	Limit      int               `mapstructure:"limit"`
-	Burst      int               `mapstructure:"burst"`
-	KeyBy      []string          `mapstructure:"key_by"`
-	Conditions map[string]string `mapstructure:"conditions"`
+	Name      string        `mapstructure:"name"`
+	Algorithm string        `mapstructure:"algorithm"` // memory_bucket | redis_window
+	Rate      string        `mapstructure:"rate"`      // memory_bucket: "100/s" | "60/m" | "1000/h"
+	Window    time.Duration `mapstructure:"window"`    // redis_window
+	Limit     int           `mapstructure:"limit"`     // redis_window
+	Burst     int           `mapstructure:"burst"`     // memory_bucket; 0 → defaults to int(Rate)
+	KeyBy     []string      `mapstructure:"key_by"`    // [] | [api_key] | [api_key, model]
 }
 
 // Load reads configuration from the given YAML file. An empty path loads

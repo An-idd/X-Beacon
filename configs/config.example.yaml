@@ -48,7 +48,35 @@ auth:
     # isn't shadowed by a stale "not found".
     negative_ttl: 5s
 
+# Rate-limiting rules (Week 5). Multiple rules compose: any rule rejects
+# → request rejected (429). Empty list disables rate-limiting entirely.
+#
+# Algorithms:
+#   memory_bucket — single-instance token bucket; uses `rate` ("100/s" |
+#                   "60/m" | "1000/h") and optional `burst` (defaults to
+#                   the per-second numerator).
+#   redis_window  — distributed sliding window; uses `limit` and
+#                   `window`. Requires redis.addr to be reachable.
+#
+# key_by composes the bucket key per rule. [] = global, ["api_key"] =
+# per-API-key, ["api_key","model"] = per-key-per-model. Allowed dims:
+# api_key, model.
 rate_limits: []
+# rate_limits:
+#   - name: global-rps
+#     algorithm: memory_bucket
+#     rate: 1000/s
+#     burst: 2000
+#   - name: per-key-min
+#     algorithm: redis_window
+#     limit: 60
+#     window: 1m
+#     key_by: [api_key]
+#   - name: per-key-model-hour
+#     algorithm: redis_window
+#     limit: 1000
+#     window: 1h
+#     key_by: [api_key, model]
 
 cache:
   exact:

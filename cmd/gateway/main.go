@@ -126,10 +126,16 @@ func runWithCtx(ctx context.Context, args []string, stdout *os.File) error {
 
 	checkers := buildReadinessCheckers(pool, rdb)
 
+	rateLimiter, err := buildRateLimiter(cfg, rdb, logger)
+	if err != nil {
+		return fmt.Errorf("init rate limiter: %w", err)
+	}
+
 	srv, err := server.New(server.Deps{
 		Logger:            logger,
 		Registry:          reg,
 		Authn:             authn,
+		RateLimiter:       rateLimiter,
 		MetricsReg:        metricsReg,
 		MetricsEnabled:    cfg.Observability.Metrics.Enabled,
 		MetricsPath:       cfg.Observability.Metrics.Path,
