@@ -117,9 +117,42 @@ resp = client.chat.completions.create(
 
 ```bash
 # 需要 Go 1.22+
-make build
+make build                                 # 同时编 gateway 和 xbctl
 ./bin/x-beacon --config configs/config.yaml
 ```
+
+### 启动期运维（Week 4 加入）
+
+完整启动流程依赖 Postgres + Redis，由 `xbctl` 完成 schema 与首个 API key 的初始化：
+
+```bash
+# 1. 启动依赖
+make docker-up
+
+# 2. 应用 schema 迁移（嵌入二进制，无需仓库）
+./bin/xbctl migrate up
+
+# 3. 生成 API key（secret 仅打印一次，立即抓取）
+./bin/xbctl keygen -name "local dev"
+# 输出示例：
+#   secret: sk-aBcD…46chars
+
+# 4. 启动 gateway
+./bin/x-beacon --config configs/config.yaml
+
+# 5. 验证就绪
+curl -s localhost:8080/readyz | jq .
+# {"ready":true,"checks":{"postgres":{"ok":true},"redis":{"ok":true}}}
+```
+
+`xbctl` 子命令速查：
+
+| 子命令 | 用途 |
+|--------|------|
+| `xbctl migrate up\|down\|version` | schema 管理 |
+| `xbctl keygen -name <label>` | 生成新 key（secret 仅打印一次） |
+| `xbctl keylist [-all] [-json]` | 查看 key 列表 |
+| `xbctl keyrevoke -id <id>` | 撤销 key（cache 最多 60s 内仍可能放行） |
 
 详细部署说明见 [部署文档](docs/deployment.md)。
 

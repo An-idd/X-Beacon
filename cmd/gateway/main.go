@@ -15,16 +15,11 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.uber.org/zap"
 
+	"github.com/An-idd/x-beacon/internal/auth"
 	"github.com/An-idd/x-beacon/internal/config"
 	"github.com/An-idd/x-beacon/internal/observability"
 	"github.com/An-idd/x-beacon/internal/server"
-)
-
-// Populated at build time via -ldflags (see Makefile).
-var (
-	version   = "dev"
-	commit    = "none"
-	buildTime = "unknown"
+	"github.com/An-idd/x-beacon/pkg/version"
 )
 
 func main() {
@@ -55,7 +50,7 @@ func runWithCtx(ctx context.Context, args []string, stdout *os.File) error {
 		return err
 	}
 	if showVersion {
-		fmt.Fprintf(stdout, "x-beacon %s (commit %s, built %s)\n", version, commit, buildTime)
+		fmt.Fprintln(stdout, version.Banner())
 		return nil
 	}
 
@@ -80,9 +75,33 @@ func runWithCtx(ctx context.Context, args []string, stdout *os.File) error {
 		return fmt.Errorf("init provider registry: %w", err)
 	}
 
-	authn, err := loadAuth(cfg.AuthFile, logger)
+	pool, err := loadPool(ctx, cfg, logger)
+	if err != nil {
+		return fmt.Errorf("init storage pool: %w", err)
+	}
+	if pool != nil {
+		defer pool.Close()
+	}
+
+	authn, err := loadAuth(ctx, pool, logger)
 	if err != nil {
 		return fmt.Errorf("init auth: %w", err)
+	}
+
+	// Wrap Authenticator with the Redis cache when both Redis is up AND a
+	// real authenticator was constructed. Either component being absent
+	// degrades cleanly to "no cache" — the gateway still works, just
+	// hotter on the DB.
+	rdb := loadRedis(ctx, cfg, logger)
+	if rdb != nil {
+		defer func() { _ = rdb.Close() }()
+		if authn != nil && cfg.Auth.Cache.PositiveTTL > 0 {
+			authn = auth.NewCached(authn, rdb,
+				cfg.Auth.Cache.PositiveTTL, cfg.Auth.Cache.NegativeTTL, logger)
+			logger.Info("auth cache enabled",
+				zap.Duration("positive_ttl", cfg.Auth.Cache.PositiveTTL),
+				zap.Duration("negative_ttl", cfg.Auth.Cache.NegativeTTL))
+		}
 	}
 
 	tp, shutdownTracing, err := observability.NewTracerProvider(ctx, observability.TracingConfig{
@@ -105,14 +124,17 @@ func runWithCtx(ctx context.Context, args []string, stdout *os.File) error {
 		}
 	}()
 
+	checkers := buildReadinessCheckers(pool, rdb)
+
 	srv, err := server.New(server.Deps{
-		Logger:         logger,
-		Registry:       reg,
-		Authn:          authn,
-		MetricsReg:     metricsReg,
-		MetricsEnabled: cfg.Observability.Metrics.Enabled,
-		MetricsPath:    cfg.Observability.Metrics.Path,
-		ServiceName:    cfg.Observability.Tracing.ServiceName,
+		Logger:            logger,
+		Registry:          reg,
+		Authn:             authn,
+		MetricsReg:        metricsReg,
+		MetricsEnabled:    cfg.Observability.Metrics.Enabled,
+		MetricsPath:       cfg.Observability.Metrics.Path,
+		ServiceName:       cfg.Observability.Tracing.ServiceName,
+		ReadinessCheckers: checkers,
 	})
 	if err != nil {
 		return fmt.Errorf("init server: %w", err)
@@ -130,8 +152,8 @@ func runWithCtx(ctx context.Context, args []string, stdout *os.File) error {
 	go func() {
 		logger.Info("server starting",
 			zap.String("addr", cfg.Server.Addr),
-			zap.String("version", version),
-			zap.String("commit", commit),
+			zap.String("version", version.Version),
+			zap.String("commit", version.Commit),
 		)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err

@@ -9,7 +9,9 @@ package smoke
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -27,6 +30,7 @@ import (
 	"github.com/An-idd/x-beacon/internal/auth"
 	"github.com/An-idd/x-beacon/internal/provider/registry"
 	"github.com/An-idd/x-beacon/internal/server"
+	"github.com/An-idd/x-beacon/pkg/version"
 )
 
 // fixture builds a fully-wired Server backed by three httptest upstreams
@@ -40,6 +44,12 @@ type fixture struct {
 
 	// AuthKey is the bearer token configured in the static auth table.
 	AuthKey string
+
+	// dbReady / redisReady drive the /readyz checkers. Tests flip them
+	// to simulate dependency health transitions without rebuilding the
+	// fixture; both default to true on construction.
+	dbReady    *atomic.Bool
+	redisReady *atomic.Bool
 }
 
 func (f *fixture) Close() {
@@ -95,24 +105,50 @@ providers:
 	})
 	require.NoError(t, err)
 
+	dbReady := &atomic.Bool{}
+	dbReady.Store(true)
+	redisReady := &atomic.Bool{}
+	redisReady.Store(true)
+
+	// Two readiness checkers parameterized by the controllable flags below.
+	// Tests can flip dbReady / redisReady between calls to simulate
+	// dependency health changes without rebuilding the whole fixture.
+	checkers := []server.ReadinessChecker{
+		{Name: "postgres", Check: func(context.Context) error {
+			if !dbReady.Load() {
+				return errors.New("postgres unreachable (test)")
+			}
+			return nil
+		}},
+		{Name: "redis", Check: func(context.Context) error {
+			if !redisReady.Load() {
+				return errors.New("redis unreachable (test)")
+			}
+			return nil
+		}},
+	}
+
 	srv, err := server.New(server.Deps{
-		Logger:         zap.NewNop(),
-		Registry:       reg,
-		Authn:          authn,
-		MetricsReg:     prometheus.NewRegistry(),
-		MetricsEnabled: true,
-		MetricsPath:    "/metrics",
+		Logger:            zap.NewNop(),
+		Registry:          reg,
+		Authn:             authn,
+		MetricsReg:        prometheus.NewRegistry(),
+		MetricsEnabled:    true,
+		MetricsPath:       "/metrics",
+		ReadinessCheckers: checkers,
 	})
 	require.NoError(t, err)
 
 	gateway := httptest.NewServer(srv.Handler())
 
 	return &fixture{
-		gateway:  gateway,
-		openai:   openai,
-		anthrop:  anthrop,
-		deepseek: deepseek,
-		AuthKey:  authKey,
+		gateway:    gateway,
+		openai:     openai,
+		anthrop:    anthrop,
+		deepseek:   deepseek,
+		AuthKey:    authKey,
+		dbReady:    dbReady,
+		redisReady: redisReady,
 	}
 }
 
@@ -373,3 +409,61 @@ func TestSmoke_UnknownModelReturns400(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, status)
 	assert.Contains(t, string(raw), "model_not_found")
 }
+
+func TestSmoke_Readyz_Healthy(t *testing.T) {
+	fx := newFixture(t,
+		func(http.ResponseWriter, *http.Request) {},
+		func(http.ResponseWriter, *http.Request) {},
+		func(http.ResponseWriter, *http.Request) {},
+	)
+	defer fx.Close()
+
+	// Both deps default to ready.
+	status, raw := fx.get(t, "/readyz", false) // /readyz must work without auth
+	assert.Equal(t, http.StatusOK, status)
+	assert.Contains(t, string(raw), `"ready":true`)
+}
+
+func TestSmoke_Readyz_DBDown(t *testing.T) {
+	fx := newFixture(t,
+		func(http.ResponseWriter, *http.Request) {},
+		func(http.ResponseWriter, *http.Request) {},
+		func(http.ResponseWriter, *http.Request) {},
+	)
+	defer fx.Close()
+
+	fx.dbReady.Store(false)
+
+	status, raw := fx.get(t, "/readyz", false)
+	assert.Equal(t, http.StatusServiceUnavailable, status)
+	body := string(raw)
+	assert.Contains(t, body, `"ready":false`)
+	assert.Contains(t, body, "postgres unreachable")
+	// Redis still OK so its block must reflect that.
+	assert.Contains(t, body, `"redis":{"ok":true}`)
+}
+
+func TestSmoke_UserAgentForwarded(t *testing.T) {
+	// Capture the user-agent the gateway sends to the upstream and verify
+	// the pkg/version-injected value is passed through. This guards against
+	// future refactors silently dropping the header.
+	var seenUA atomic.Value // string
+	openaiHandler := func(w http.ResponseWriter, r *http.Request) {
+		seenUA.Store(r.Header.Get("User-Agent"))
+		writeJSON(t, w, openaiChatResponse())
+	}
+	fx := newFixture(t,
+		openaiHandler,
+		func(http.ResponseWriter, *http.Request) {},
+		func(http.ResponseWriter, *http.Request) {},
+	)
+	defer fx.Close()
+
+	status, _, _ := fx.post(t, "/v1/chat/completions", chatRequest("gpt-4o", false), true)
+	require.Equal(t, http.StatusOK, status)
+
+	got, _ := seenUA.Load().(string)
+	assert.Equal(t, version.UserAgent(), got, "gateway must forward pkg/version UA verbatim")
+	assert.True(t, strings.HasPrefix(got, "x-beacon/"), "got %q", got)
+}
+

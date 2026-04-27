@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/An-idd/x-beacon/internal/provider"
+	"github.com/An-idd/x-beacon/pkg/version"
 )
 
 const (
@@ -22,7 +23,6 @@ const (
 	defaultAPIVersion = "2023-06-01"
 	defaultMaxTokens  = 4096
 	messagesPath      = "/v1/messages"
-	userAgent         = "x-beacon"
 )
 
 // Config describes one Anthropic provider instance.
@@ -110,6 +110,6 @@ func (p *Provider) setHeaders(req *http.Request) {
 	req.Header.Set("anthropic-version", p.cfg.APIVersion)
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("accept", "application/json")
-	req.Header.Set("user-agent", userAgent)
+	req.Header.Set("user-agent", version.UserAgent())
 }
 

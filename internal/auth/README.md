@@ -4,57 +4,104 @@ API key authentication.
 
 ## Status
 
-- **v1 (Week 3, current)**: static, in-memory key table loaded from
-  `configs/auth.yaml`. Hash-on-load, never persists raw secrets.
-- **v2 (Week 4, planned)**: Postgres-backed table with Redis cache. Same
-  `Authenticator` interface — only the storage swaps.
+| Backend | Status | When to use |
+|---------|--------|-------------|
+| `PostgresAuthenticator` | **production** (Step 4.3) | Always, in real deployments |
+| `StaticAuthenticator` | **test helper only** (downgraded in Step 4.3) | Unit tests, smoke tests, anything that shouldn't depend on a live DB |
+| `CachedAuthenticator` | **production** (Step 4.4) | Wraps Postgres with Redis cache + negative cache + singleflight |
 
 ## Public surface
 
 | Symbol | Purpose |
 |--------|---------|
-| `Authenticator` | Interface: `Authenticate(ctx, key) (*Principal, error)` |
-| `Principal` | Identifies the API consumer behind a request — `ID`, `Name` (no secrets) |
-| `WithPrincipal` / `PrincipalFrom` | Context plumbing used by the auth middleware and handlers |
+| `Authenticator` | Interface — `Authenticate(ctx, key) (*Principal, error)` |
+| `Principal` | Identifies the API consumer — `ID`, `Name` (no secrets) |
+| `WithPrincipal` / `PrincipalFrom` | Context plumbing used by the auth middleware |
 | `ErrMissingCredentials` / `ErrInvalidCredentials` | Sentinels for middleware classification |
-| `NewStatic(entries)` | Build a static authenticator (used by tests + `Load`) |
-| `Load(path)` | Read `auth.yaml` → `*StaticAuthenticator` |
+| `NewPostgres(pool)` | DB-backed Authenticator, queries `api_keys` |
+| `NewCached(inner, redis, posTTL, negTTL, logger)` | Wraps any inner with the Redis cache decorator |
+| `NewStatic(entries)` | **Test helper** — in-memory, hash-on-load, never used in main wiring |
 
-## YAML schema (`configs/auth.yaml`)
+## Postgres backend
 
-```yaml
-keys:
-  - id: dev-local           # stable, non-secret identifier
-    name: "Local development"  # display name, optional
-    secret: ${XBEACON_DEV_KEY:-sk-local-dev}  # ${VAR} or ${VAR:-default}
+Single SQL statement does the lookup AND the `last_used_at` refresh:
+
+```sql
+UPDATE api_keys
+   SET last_used_at = now()
+ WHERE key_hash = $1
+   AND revoked_at IS NULL
+RETURNING id, name
 ```
 
-Env-var expansion is shared with `providers.yaml` via
-`internal/envexpand`. An expanded-empty secret fails Load — silently
-dropping a principal would be worse than refusing to start.
+The partial index `idx_api_keys_active_hash` (only over non-revoked rows)
+keeps this an index-scan even as the audit history grows.
 
-## Design notes
+`pgx.ErrNoRows` → `ErrInvalidCredentials`. Any other DB error is wrapped
+and bubbles up; the auth middleware maps unwrapped errors to 500.
 
-- **Hash on load, never on lookup**: the static table indexes by
-  SHA-256(secret); raw secrets exit memory after `NewStatic` returns.
-  `Authenticate` hashes the inbound key once, then does a map lookup —
-  no plaintext compare, no per-secret branching that could leak via
-  timing.
-- **Duplicate-secret detection at startup**: two principals sharing a
-  secret would silently mask one. `NewStatic` rejects this so misconfig
-  is caught at boot, not at first auth attempt.
-- **Errors are aggregated**: `NewStatic` collects all entry errors via
-  `errors.Join` (same idiom as registry.Load), so a single fix-pass on
-  auth.yaml clears the entire list.
-- **Backend errors are distinct from invalid credentials**: middleware
-  maps `ErrInvalidCredentials` → 401, anything else → 500. Week 4's DB
-  outage path uses this distinction.
+`Authenticate` does not check the DB pool's health on every call — that's
+the readiness probe's job (Step 4.6 `/readyz`). If the DB goes down
+mid-traffic, in-flight queries fail fast and return 500; cached principals
+(Step 4.4) keep working until their TTL expires.
 
-## Testing
+## Cache layer (Step 4.4)
 
-`internal/auth` is hermetic — no network, no goroutines. Tests cover
-constructor validation, env expansion, and the three `Authenticate`
-outcomes. Middleware tests live in
-[`internal/server/middleware/auth_test.go`](../server/middleware/auth_test.go)
-and use a `fakeAuthn` to keep them decoupled from the static
-implementation's hashing.
+`CachedAuthenticator` wraps any inner Authenticator with three behaviors:
+
+1. **Positive cache** (default 60s TTL). Successful lookups skip both the
+   DB roundtrip AND the `last_used_at` update on subsequent hits.
+2. **Negative cache** (default 5s TTL). `ErrInvalidCredentials` is cached
+   briefly so a flood of bogus tokens can't DDoS the DB. The TTL is
+   intentionally short so a freshly-issued key isn't shadowed by a stale
+   "not found" entry.
+3. **Singleflight** (`golang.org/x/sync/singleflight`). N concurrent
+   misses for the same key collapse into one inner call — no thundering
+   herd at cache-eviction boundaries.
+
+### Cache layout
+
+```
+key:   auth:k:<sha256-hex>
+value: <Principal JSON>   (positive)
+       null               (negative)
+```
+
+Hex keys make `redis-cli KEYS auth:k:*` debuggable at the cost of 64 bytes
+per key (deemed worthwhile vs. binary).
+
+### Side effect: `last_used_at` precision
+
+Cache hits do NOT bump `last_used_at` on the inner Postgres backend.
+Net write reduction is ~99% under realistic cache-hit rates, but the
+column's semantics shift from "exact last auth" to **"last cache miss
+for this key"** (precision = `posTTL`, default 60s). Operators who
+need fine-grained access timestamps must either lower `posTTL` or sample
+auth logs.
+
+### Failure modes
+
+- **Redis unreachable**: cache reads fail silently; cache writes no-op;
+  every request hits the inner Authenticator. The gateway stays up.
+- **Cache value malformed** (manual `SET` of garbage by an admin, or a
+  schema-incompatible upgrade): treated as miss, replaced on next write.
+- **Inner backend error** (DB outage, etc.): NOT cached. Transient
+  failures must retry, not poison.
+
+## Static backend (test helper)
+
+Kept for `test/smoke_test.go` and middleware tests that need an
+Authenticator without spinning up Postgres. Hash-on-load semantics still
+apply — raw secrets exit memory after `NewStatic` returns.
+
+If you find yourself reaching for `NewStatic` in production code, that's
+a mistake: it cannot be revoked, scoped, or rotated.
+
+## Hash function
+
+Both backends use SHA-256:
+
+- `hashKeyBytes(secret) []byte` — 32 raw bytes for the Postgres BYTEA column
+- `hashKeyHex(secret) string` — 64-char lowercase hex for the in-memory map (Go map keys can't be byte slices)
+
+Same digest, just different envelopes.

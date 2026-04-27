@@ -32,6 +32,10 @@ type Deps struct {
 	// /v1/* unauthenticated and logs a warn line at startup.
 	Authn auth.Authenticator
 
+	// ReadinessCheckers feed /readyz. Order is preserved in the JSON body
+	// for stable parsing. nil/empty makes /readyz a trivial 200.
+	ReadinessCheckers []ReadinessChecker
+
 	// MetricsEnabled / MetricsPath are pulled out of config so server stays
 	// agnostic to the full config shape — easier to test and reuse.
 	MetricsEnabled bool
@@ -83,9 +87,11 @@ func New(deps Deps) (*Server, error) {
 	r.Use(middleware.Tracing(deps.ServiceName))
 	r.Use(middleware.Logging(deps.Logger, middleware.LoggingOptions{SkipPaths: skipPaths}))
 
-	// Liveness probe: process is up. Distinct from /readyz (Phase 0 carry-over)
-	// which is added in Week 4 once DB/Redis are real dependencies.
+	// Liveness probe: process is up. Distinct from /readyz, which checks
+	// downstream dependencies (DB, Redis) and refuses traffic when they
+	// are unavailable.
 	r.Get("/healthz", healthzHandler())
+	r.Get("/readyz", readyzHandler(deps.ReadinessCheckers))
 
 	// /v1/* lives on a subrouter so Auth can attach without leaking onto
 	// /healthz or /metrics. Auth is mounted only when Authn is configured;

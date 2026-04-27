@@ -34,9 +34,19 @@ redis:
 # Provider configuration lives in configs/providers.yaml (loaded separately).
 providers_file: configs/providers.yaml
 
-# API key table lives in configs/auth.yaml. If absent, /v1/* runs
-# unauthenticated and the gateway logs a warning (dev-mode behavior).
-auth_file: configs/auth.yaml
+# Authentication is backed by Postgres (api_keys table). To enable auth,
+# set database.dsn above and run `xbctl migrate up` once. If the database
+# is unreachable at startup, the gateway logs a warning and serves /v1/*
+# unauthenticated (dev-mode behavior).
+auth:
+  cache:
+    # Successful lookups are cached this long. 0 disables the cache layer
+    # even when Redis is reachable.
+    positive_ttl: 60s
+    # Invalid-credentials results are cached briefly so a flood of bogus
+    # tokens can't hammer the DB. Kept short so a freshly-issued key
+    # isn't shadowed by a stale "not found".
+    negative_ttl: 5s
 
 rate_limits: []
 

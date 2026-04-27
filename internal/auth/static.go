@@ -2,8 +2,6 @@ package auth
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 )
@@ -12,6 +10,11 @@ import (
 // SHA-256(secret). Hashing on load means the raw secret never persists in
 // the running process beyond the construction call, narrowing the blast
 // radius of e.g. a heap dump.
+//
+// Status: TEST HELPER ONLY (Step 4.3 onwards). Production wiring uses
+// PostgresAuthenticator. Static is retained because [test/smoke_test.go]
+// and [internal/server/middleware/auth_test.go] need an in-memory
+// Authenticator that doesn't require a running Postgres.
 //
 // Safe for concurrent use after construction (the underlying map is
 // read-only).
@@ -50,7 +53,7 @@ func NewStatic(entries []StaticEntry) (*StaticAuthenticator, error) {
 		}
 		seenID[e.ID] = struct{}{}
 
-		hash := hashKey(e.Secret)
+		hash := hashKeyHex(e.Secret)
 		if existing, dup := byHash[hash]; dup {
 			errs = append(errs, fmt.Errorf("auth: entry[%d] %q: secret collides with id %q", i, e.ID, existing.ID))
 			continue
@@ -81,7 +84,7 @@ func (s *StaticAuthenticator) Authenticate(_ context.Context, key string) (*Prin
 	if key == "" {
 		return nil, ErrMissingCredentials
 	}
-	p, ok := s.byHash[hashKey(key)]
+	p, ok := s.byHash[hashKeyHex(key)]
 	if !ok {
 		return nil, ErrInvalidCredentials
 	}
@@ -90,9 +93,3 @@ func (s *StaticAuthenticator) Authenticate(_ context.Context, key string) (*Prin
 
 // Size returns the number of registered principals. Useful for startup logs.
 func (s *StaticAuthenticator) Size() int { return len(s.byHash) }
-
-// hashKey returns the lowercase hex SHA-256 of secret.
-func hashKey(secret string) string {
-	sum := sha256.Sum256([]byte(secret))
-	return hex.EncodeToString(sum[:])
-}

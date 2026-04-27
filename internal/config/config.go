@@ -21,9 +21,24 @@ type Config struct {
 	Database      DatabaseConfig      `mapstructure:"database"`
 	Redis         RedisConfig         `mapstructure:"redis"`
 	ProvidersFile string              `mapstructure:"providers_file"`
-	AuthFile      string              `mapstructure:"auth_file"`
+	Auth          AuthConfig          `mapstructure:"auth"`
 	RateLimits    []RateLimitRule     `mapstructure:"rate_limits"`
 	Cache         CacheConfig         `mapstructure:"cache"`
+}
+
+// AuthConfig holds settings for the API-key auth path. Step 4.4 introduces
+// the Redis cache layer; future auth changes (token rotation, key types)
+// extend this struct.
+type AuthConfig struct {
+	Cache AuthCacheConfig `mapstructure:"cache"`
+}
+
+// AuthCacheConfig configures the Redis cache that fronts the
+// PostgresAuthenticator. PositiveTTL=0 OR an unreachable Redis disables
+// the cache; the gateway falls back to direct DB lookups.
+type AuthCacheConfig struct {
+	PositiveTTL time.Duration `mapstructure:"positive_ttl"`
+	NegativeTTL time.Duration `mapstructure:"negative_ttl"`
 }
 
 type ServerConfig struct {
@@ -149,8 +164,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("redis.addr", "localhost:6379")
 	v.SetDefault("redis.pool_size", 50)
 
+	v.SetDefault("auth.cache.positive_ttl", 60*time.Second)
+	v.SetDefault("auth.cache.negative_ttl", 5*time.Second)
+
 	v.SetDefault("providers_file", "configs/providers.yaml")
-	v.SetDefault("auth_file", "configs/auth.yaml")
 
 	v.SetDefault("cache.exact.enabled", true)
 	v.SetDefault("cache.exact.ttl", time.Hour)

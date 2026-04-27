@@ -1,17 +1,20 @@
 SHELL := /bin/bash
 
 BINARY      := x-beacon
+CTL_BINARY  := xbctl
 CMD_PATH    := ./cmd/gateway
+CTL_PATH    := ./cmd/xbctl
 BIN_DIR     := bin
 COVERAGE    := coverage.txt
 
 VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT      ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 BUILD_TIME  ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+VERSION_PKG := github.com/An-idd/x-beacon/pkg/version
 LDFLAGS     := -s -w \
-  -X main.version=$(VERSION) \
-  -X main.commit=$(COMMIT) \
-  -X main.buildTime=$(BUILD_TIME)
+  -X $(VERSION_PKG).Version=$(VERSION) \
+  -X $(VERSION_PKG).Commit=$(COMMIT) \
+  -X $(VERSION_PKG).BuildTime=$(BUILD_TIME)
 
 GO          ?= go
 GOFLAGS     ?=
@@ -24,12 +27,20 @@ help:
 	@awk 'BEGIN{FS=":.*##"; printf "Targets:\n"} /^[a-zA-Z_-]+:.*##/ { printf "  %-18s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 .PHONY: build
-build: ## Build the gateway binary into ./bin
+build: build-gateway build-ctl ## Build both the gateway and xbctl binaries
+
+.PHONY: build-gateway
+build-gateway: ## Build the gateway binary into ./bin
 	@mkdir -p $(BIN_DIR)
 	$(GO) build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/$(BINARY) $(CMD_PATH)
 
+.PHONY: build-ctl
+build-ctl: ## Build the xbctl ops CLI into ./bin
+	@mkdir -p $(BIN_DIR)
+	$(GO) build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/$(CTL_BINARY) $(CTL_PATH)
+
 .PHONY: dev
-dev: configs/config.yaml configs/auth.yaml ## Run the gateway locally (reads configs/config.yaml)
+dev: configs/config.yaml ## Run the gateway locally (reads configs/config.yaml)
 	$(GO) run $(CMD_PATH) --config configs/config.yaml
 
 .PHONY: run
@@ -40,9 +51,6 @@ configs/config.yaml:
 
 configs/providers.yaml:
 	@cp configs/providers.example.yaml $@ && echo "created $@ from example — set OPENAI_API_KEY/ANTHROPIC_API_KEY/DEEPSEEK_API_KEY before launch"
-
-configs/auth.yaml:
-	@cp configs/auth.example.yaml $@ && echo "created $@ from example — set XBEACON_DEV_KEY (or accept the default sk-local-dev) before launch"
 
 .PHONY: test
 test: ## Unit tests

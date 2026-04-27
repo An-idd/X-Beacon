@@ -10,13 +10,13 @@ import (
 	"time"
 
 	"github.com/An-idd/x-beacon/internal/provider"
+	"github.com/An-idd/x-beacon/pkg/version"
 )
 
 const (
 	defaultEndpoint = "https://api.openai.com"
 	defaultTimeout  = 60 * time.Second
 	chatPath        = "/v1/chat/completions"
-	userAgent       = "x-beacon"
 )
 
 // Config describes one OpenAI-compatible provider instance. Multiple
@@ -104,7 +104,7 @@ func (p *Provider) setHeaders(req *http.Request) {
 	req.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", version.UserAgent())
 	if p.cfg.Organization != "" {
 		req.Header.Set("OpenAI-Organization", p.cfg.Organization)
 	}

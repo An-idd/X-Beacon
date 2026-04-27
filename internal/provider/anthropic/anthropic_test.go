@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/An-idd/x-beacon/internal/provider"
+	"github.com/An-idd/x-beacon/pkg/version"
 )
 
 func newTestProvider(t *testing.T, handler http.HandlerFunc) *Provider {
@@ -99,7 +100,7 @@ func TestSetHeaders(t *testing.T) {
 	assert.Empty(t, req.Header.Get("Authorization"), "must NOT use Authorization: Bearer")
 	assert.Equal(t, defaultAPIVersion, req.Header.Get("anthropic-version"))
 	assert.Equal(t, "application/json", req.Header.Get("Content-Type"))
-	assert.Equal(t, userAgent, req.Header.Get("User-Agent"))
+	assert.Equal(t, version.UserAgent(), req.Header.Get("User-Agent"))
 }
 
 // Ensure errors package-level aliasing hasn't accidentally shadowed sentinels.

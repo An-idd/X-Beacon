@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/An-idd/x-beacon/pkg/version"
 )
 
 // newTestProvider spins up an httptest server running handler and returns a
@@ -89,7 +91,7 @@ func TestSetHeaders(t *testing.T) {
 	assert.Equal(t, "Bearer sk-secret", req.Header.Get("Authorization"))
 	assert.Equal(t, "application/json", req.Header.Get("Content-Type"))
 	assert.Equal(t, "application/json", req.Header.Get("Accept"))
-	assert.Equal(t, userAgent, req.Header.Get("User-Agent"))
+	assert.Equal(t, version.UserAgent(), req.Header.Get("User-Agent"))
 	assert.Equal(t, "org-abc", req.Header.Get("OpenAI-Organization"))
 }
 

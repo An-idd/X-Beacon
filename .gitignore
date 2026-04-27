@@ -16,7 +16,6 @@ coverage.html
 # Local config (only *.example.yaml is committed)
 /configs/config.yaml
 /configs/providers.yaml
-/configs/auth.yaml
 /configs/*.local.yaml
 /configs/*.local.yml
 .env
