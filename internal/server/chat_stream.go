@@ -7,6 +7,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/An-idd/x-beacon/internal/provider"
+	"github.com/An-idd/x-beacon/internal/router"
 	"github.com/An-idd/x-beacon/internal/server/sse"
 )
 
@@ -28,17 +29,16 @@ import (
 func handleChatStream(
 	w http.ResponseWriter,
 	r *http.Request,
-	p provider.Provider,
+	rtr *router.Router,
 	req *provider.ChatRequest,
 	logger *zap.Logger,
 	reqID string,
 ) {
-	ch, err := p.ChatCompletionStream(r.Context(), req)
+	ch, err := rtr.ChatCompletionStream(r.Context(), req)
 	if err != nil {
 		m := mapProviderError(err)
 		logger.Warn("chat stream rejected pre-stream",
 			zap.String("req_id", reqID),
-			zap.String("provider", p.Name()),
 			zap.String("model", req.Model),
 			zap.Int("status", m.Status),
 			zap.Error(err))
@@ -63,7 +63,7 @@ func handleChatStream(
 
 	for ev := range ch {
 		if ev.Err != nil {
-			emitStreamError(sw, ev.Err, p.Name(), req.Model, reqID, logger)
+			emitStreamError(sw, ev.Err, req.Model, reqID, logger)
 			return
 		}
 
@@ -71,11 +71,11 @@ func handleChatStream(
 		if err != nil {
 			logger.Error("encode stream chunk",
 				zap.String("req_id", reqID),
-				zap.String("provider", p.Name()),
+				zap.String("model", req.Model),
 				zap.Error(err))
 			// Same envelope as a mid-stream error: client gets one bad event
 			// instead of a silently truncated stream.
-			emitStreamError(sw, err, p.Name(), req.Model, reqID, logger)
+			emitStreamError(sw, err, req.Model, reqID, logger)
 			return
 		}
 
@@ -105,10 +105,13 @@ var doneMarker = []byte("[DONE]")
 // The message is sourced from the upstream's structured error body when
 // available — never the raw err.Error() — to avoid leaking prompts that
 // some providers echo back inside their error strings.
+//
+// Provider attribution is logged by the router layer; this function
+// records only the model + req_id since the handler no longer holds a
+// direct provider reference.
 func emitStreamError(
 	sw *sse.Writer,
 	err error,
-	providerName string,
 	model string,
 	reqID string,
 	logger *zap.Logger,
@@ -137,7 +140,6 @@ func emitStreamError(
 
 	logger.Warn("chat stream upstream error",
 		zap.String("req_id", reqID),
-		zap.String("provider", providerName),
 		zap.String("model", model),
 		zap.Int("status", m.Status),
 		zap.Error(err))

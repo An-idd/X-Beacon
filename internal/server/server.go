@@ -17,6 +17,7 @@ import (
 	"github.com/An-idd/x-beacon/internal/auth"
 	"github.com/An-idd/x-beacon/internal/provider/registry"
 	"github.com/An-idd/x-beacon/internal/ratelimit"
+	"github.com/An-idd/x-beacon/internal/router"
 	"github.com/An-idd/x-beacon/internal/server/middleware"
 )
 
@@ -37,6 +38,12 @@ type Deps struct {
 	// nil/empty Multi → no-op; rate-limit middleware short-circuits and
 	// the chain runs without any per-request rate-limit cost.
 	RateLimiter *ratelimit.Multi
+
+	// Router orchestrates retry / fail-over / circuit-breaker decisions for
+	// chat completions. main constructs it from Registry + RouterConfig.
+	// Required when chat handlers are mounted (i.e. always in the current
+	// route surface); nil triggers a missing-dep error in New.
+	Router *router.Router
 
 	// ReadinessCheckers feed /readyz. Order is preserved in the JSON body
 	// for stable parsing. nil/empty makes /readyz a trivial 200.
@@ -69,6 +76,9 @@ func New(deps Deps) (*Server, error) {
 	}
 	if deps.Registry == nil {
 		return nil, errMissingDep("Registry")
+	}
+	if deps.Router == nil {
+		return nil, errMissingDep("Router")
 	}
 	if deps.MetricsEnabled && deps.MetricsReg == nil {
 		return nil, errMissingDep("MetricsReg (required when MetricsEnabled)")
@@ -116,7 +126,7 @@ func New(deps Deps) (*Server, error) {
 		// (returns {"object":"list","data":[]}) so the gateway boots even when
 		// providers.yaml is absent.
 		v1.Get("/models", modelsHandler(deps.Registry))
-		v1.Post("/chat/completions", chatCompletionsHandler(deps.Registry, deps.Logger))
+		v1.Post("/chat/completions", chatCompletionsHandler(deps.Router, deps.Logger))
 	})
 
 	if deps.MetricsEnabled {

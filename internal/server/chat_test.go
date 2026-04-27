@@ -49,7 +49,11 @@ providers:
 func newChatHandlerSrv(t *testing.T, upstream http.HandlerFunc) *Server {
 	t.Helper()
 	reg, _ := buildRegistry(t, upstream)
-	return newTestServer(t, func(d *Deps) { d.Registry = reg })
+	return newTestServer(t, func(d *Deps) {
+		d.Registry = reg
+		// Router must observe the swapped registry; rebuild it.
+		d.Router = newTestRouter(reg)
+	})
 }
 
 func chatBody(model string, content string, stream bool) []byte {
@@ -288,6 +292,7 @@ func TestChat_LoggerCalledOnFailureWithoutLeakingPrompt(t *testing.T) {
 	srv, err := New(Deps{
 		Logger:         core,
 		Registry:       reg,
+		Router:         newTestRouter(reg),
 		MetricsReg:     nil,
 		MetricsEnabled: false,
 	})

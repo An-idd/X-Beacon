@@ -14,9 +14,32 @@ import (
 	"github.com/An-idd/x-beacon/internal/config"
 	"github.com/An-idd/x-beacon/internal/provider/registry"
 	"github.com/An-idd/x-beacon/internal/ratelimit"
+	"github.com/An-idd/x-beacon/internal/router"
 	"github.com/An-idd/x-beacon/internal/server"
 	"github.com/An-idd/x-beacon/internal/storage"
 )
+
+// buildRouter constructs the Week 6 retry/failover/breaker layer. It pulls
+// RetryPolicy + BreakerSettings from cfg.Router and wires them around the
+// existing registry. The returned *router.Router is mandatory in
+// server.Deps; callers using an empty registry still get a working router
+// (it will just return ErrNoProviderForModel on every request).
+func buildRouter(cfg *config.Config, reg *registry.Registry, logger *zap.Logger) *router.Router {
+	policy := router.RetryPolicy{
+		MaxRetries:  cfg.Router.Retry.MaxRetries,
+		MaxTotal:    cfg.Router.Retry.MaxTotal,
+		BaseBackoff: cfg.Router.Retry.BaseBackoff,
+		MaxBackoff:  cfg.Router.Retry.MaxBackoff,
+	}
+	breaker := router.BreakerSettings{
+		MaxRequests:  cfg.Router.Breaker.MaxRequests,
+		Interval:     cfg.Router.Breaker.Interval,
+		Timeout:      cfg.Router.Breaker.Timeout,
+		FailureRatio: cfg.Router.Breaker.FailureRatio,
+		MinRequests:  cfg.Router.Breaker.MinRequests,
+	}
+	return router.New(reg, policy, logger, router.WithBreakerSettings(breaker))
+}
 
 // loadPool builds the Postgres connection pool from cfg. Returns
 // (nil, nil) when database.dsn is empty — that's the dev-mode signal

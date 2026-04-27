@@ -131,6 +131,48 @@ func TestRegistry_Names(t *testing.T) {
 	assert.Equal(t, "openai-primary", reg.Names()[0])
 }
 
+func TestRegistry_ResolveChain_ExactPlusGlobsPlusDefault(t *testing.T) {
+	reg := buildTestRegistry(t)
+	// "gpt-4-turbo" — no exact owner; primary glob matches; azure glob also
+	// matches; default is primary (deduped from glob position 0).
+	chain := reg.ResolveChain("gpt-4-turbo")
+	require.Len(t, chain, 2)
+	assert.Equal(t, "openai-primary", chain[0].Name())
+	assert.Equal(t, "azure-openai", chain[1].Name())
+}
+
+func TestRegistry_ResolveChain_ExactWinsThenGlobs(t *testing.T) {
+	reg := buildTestRegistry(t)
+	// "gpt-4o-azure" — azure is exact owner; both globs ("gpt-4-*") don't
+	// match this id, so chain has only azure + default(primary).
+	chain := reg.ResolveChain("gpt-4o-azure")
+	require.Len(t, chain, 2)
+	assert.Equal(t, "azure-openai", chain[0].Name())
+	assert.Equal(t, "openai-primary", chain[1].Name())
+}
+
+func TestRegistry_ResolveChain_NoMatchEmpty(t *testing.T) {
+	reg := buildTestRegistry(t)
+	reg.defaultProvider = nil
+	chain := reg.ResolveChain("zzz-unknown")
+	assert.Empty(t, chain)
+}
+
+func TestRegistry_ResolveChain_DedupExactAndGlob(t *testing.T) {
+	reg := buildTestRegistry(t)
+	// "gpt-4o" is primary's exact AND would be caught by primary's glob
+	// "gpt-4-*" if rules accepted it (they don't — glob doesn't match this
+	// id). But verify the dedup invariant another way: primary appears
+	// once even though it's the default too.
+	chain := reg.ResolveChain("gpt-4o")
+	for i := range chain {
+		for j := i + 1; j < len(chain); j++ {
+			assert.NotEqual(t, chain[i].Name(), chain[j].Name(),
+				"duplicate provider %q in chain", chain[i].Name())
+		}
+	}
+}
+
 func TestRegistry_AllModels_FlatSortedDedup(t *testing.T) {
 	reg := buildTestRegistry(t)
 	models := reg.AllModels()

@@ -15,13 +15,20 @@ import (
 
 	"github.com/An-idd/x-beacon/internal/auth"
 	"github.com/An-idd/x-beacon/internal/provider/registry"
+	"github.com/An-idd/x-beacon/internal/router"
 )
+
+func newTestRouter(reg *registry.Registry) *router.Router {
+	return router.New(reg, router.DefaultPolicy(), zap.NewNop())
+}
 
 func newTestServer(t *testing.T, opts ...func(*Deps)) *Server {
 	t.Helper()
+	reg := registry.NewEmpty()
 	deps := Deps{
 		Logger:         zap.NewNop(),
-		Registry:       registry.NewEmpty(),
+		Registry:       reg,
+		Router:         newTestRouter(reg),
 		MetricsReg:     prometheus.NewRegistry(),
 		MetricsEnabled: true,
 		MetricsPath:    "/metrics",
@@ -35,21 +42,30 @@ func newTestServer(t *testing.T, opts ...func(*Deps)) *Server {
 }
 
 func TestNew_RequiresLogger(t *testing.T) {
-	_, err := New(Deps{Registry: registry.NewEmpty()})
+	reg := registry.NewEmpty()
+	_, err := New(Deps{Registry: reg, Router: newTestRouter(reg)})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Logger")
 }
 
 func TestNew_RequiresRegistry(t *testing.T) {
-	_, err := New(Deps{Logger: zap.NewNop()})
+	_, err := New(Deps{Logger: zap.NewNop(), Router: newTestRouter(registry.NewEmpty())})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Registry")
 }
 
+func TestNew_RequiresRouter(t *testing.T) {
+	_, err := New(Deps{Logger: zap.NewNop(), Registry: registry.NewEmpty()})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Router")
+}
+
 func TestNew_RequiresMetricsRegWhenEnabled(t *testing.T) {
+	reg := registry.NewEmpty()
 	_, err := New(Deps{
 		Logger:         zap.NewNop(),
-		Registry:       registry.NewEmpty(),
+		Registry:       reg,
+		Router:         newTestRouter(reg),
 		MetricsEnabled: true,
 	})
 	require.Error(t, err)
@@ -57,9 +73,11 @@ func TestNew_RequiresMetricsRegWhenEnabled(t *testing.T) {
 }
 
 func TestNew_AllowsDisabledMetrics(t *testing.T) {
+	reg := registry.NewEmpty()
 	srv, err := New(Deps{
 		Logger:         zap.NewNop(),
-		Registry:       registry.NewEmpty(),
+		Registry:       reg,
+		Router:         newTestRouter(reg),
 		MetricsEnabled: false,
 	})
 	require.NoError(t, err)
@@ -145,9 +163,11 @@ func TestMetrics_MountedWhenEnabled(t *testing.T) {
 }
 
 func TestMetrics_NotMountedWhenDisabled(t *testing.T) {
+	reg := registry.NewEmpty()
 	srv, err := New(Deps{
 		Logger:         zap.NewNop(),
-		Registry:       registry.NewEmpty(),
+		Registry:       reg,
+		Router:         newTestRouter(reg),
 		MetricsEnabled: false,
 	})
 	require.NoError(t, err)

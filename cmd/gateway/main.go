@@ -131,9 +131,12 @@ func runWithCtx(ctx context.Context, args []string, stdout *os.File) error {
 		return fmt.Errorf("init rate limiter: %w", err)
 	}
 
+	rtr := buildRouter(cfg, reg, logger)
+
 	srv, err := server.New(server.Deps{
 		Logger:            logger,
 		Registry:          reg,
+		Router:            rtr,
 		Authn:             authn,
 		RateLimiter:       rateLimiter,
 		MetricsReg:        metricsReg,

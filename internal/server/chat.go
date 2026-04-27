@@ -10,7 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/An-idd/x-beacon/internal/provider"
-	"github.com/An-idd/x-beacon/internal/provider/registry"
+	"github.com/An-idd/x-beacon/internal/router"
 	"github.com/An-idd/x-beacon/internal/server/middleware"
 )
 
@@ -27,13 +27,15 @@ const streamHeartbeatInterval = 15 * time.Second
 
 // chatCompletionsHandler returns the /v1/chat/completions handler.
 //
-// Non-streaming flow (3.4):
+// Non-streaming flow:
 //
-//	parse → validate → registry.ResolveModel → provider.ChatCompletion → write JSON
+//	parse → validate → router.ResolveModel (400 if unknown) →
+//	  router.ChatCompletion (retry + failover + breaker) → write JSON
 //
-// Streaming flow (req.Stream == true) returns 501 in this step and is
-// implemented by Step 3.5's SSE writer.
-func chatCompletionsHandler(reg *registry.Registry, logger *zap.Logger) http.HandlerFunc {
+// Streaming flow (req.Stream == true) delegates to handleChatStream which
+// uses router.ChatCompletionStream — same retry/failover semantics, gated
+// to "before first chunk".
+func chatCompletionsHandler(rtr *router.Router, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reqID := middleware.RequestIDFrom(r.Context())
 
@@ -43,8 +45,11 @@ func chatCompletionsHandler(reg *registry.Registry, logger *zap.Logger) http.Han
 			return
 		}
 
-		p, err := reg.ResolveModel(req.Model)
-		if err != nil {
+		// Pre-flight: surface 400 model_not_found before invoking the
+		// router so we don't conflate "unknown model" with "all upstreams
+		// failed". The router itself also surfaces no-chain errors, but
+		// here we get a clean 4xx.
+		if _, err := rtr.ResolveModel(req.Model); err != nil {
 			writeError(w, mappedError{
 				Status:  http.StatusBadRequest,
 				Type:    "invalid_request_error",
@@ -55,19 +60,15 @@ func chatCompletionsHandler(reg *registry.Registry, logger *zap.Logger) http.Han
 		}
 
 		if req.Stream {
-			handleChatStream(w, r, p, req, logger, reqID)
+			handleChatStream(w, r, rtr, req, logger, reqID)
 			return
 		}
 
-		resp, err := p.ChatCompletion(r.Context(), req)
+		resp, err := rtr.ChatCompletion(r.Context(), req)
 		if err != nil {
 			m := mapProviderError(err)
-			// Log at error level for 5xx, warn for 4xx — same convention as
-			// the Logging middleware. Prompt content is not logged; only
-			// shape + provider name + status.
 			logger.Warn("chat completion failed",
 				zap.String("req_id", reqID),
-				zap.String("provider", p.Name()),
 				zap.String("model", req.Model),
 				zap.Int("status", m.Status),
 				zap.Error(err))
@@ -76,12 +77,8 @@ func chatCompletionsHandler(reg *registry.Registry, logger *zap.Logger) http.Han
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		// Default 200; explicit WriteHeader so the Logging middleware sees it
-		// even when Encode happens to flush at the same instant.
 		w.WriteHeader(http.StatusOK)
 		if err := jsonEncode(w, resp); err != nil {
-			// At this point status is already written; can't change it.
-			// Just log and let the client see a truncated body.
 			logger.Error("failed to encode chat response",
 				zap.String("req_id", reqID),
 				zap.Error(err))

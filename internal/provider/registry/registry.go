@@ -74,25 +74,52 @@ func (r *Registry) GetByName(name string) (provider.Provider, error) {
 //
 // Returns ErrNoProviderForModel if no tier matches.
 func (r *Registry) ResolveModel(model string) (provider.Provider, error) {
+	chain := r.ResolveChain(model)
+	if len(chain) == 0 {
+		return nil, fmt.Errorf("%w: %q", ErrNoProviderForModel, model)
+	}
+	return chain[0], nil
+}
+
+// ResolveChain returns every provider that COULD serve the given model, in
+// priority order: exact owner first, then each matching glob in
+// declaration order, then default_provider. Duplicates are removed (a
+// provider that both exact-matches and glob-matches appears once at its
+// highest priority position).
+//
+// Used by the router (Week 6) to fail over to the next-best provider when
+// the primary returns a retryable error. Returns nil when no tier matches.
+func (r *Registry) ResolveChain(model string) []provider.Provider {
+	chain := make([]provider.Provider, 0, 3)
+	seen := make(map[string]struct{}, 3)
+	add := func(p provider.Provider) {
+		if p == nil {
+			return
+		}
+		if _, dup := seen[p.Name()]; dup {
+			return
+		}
+		seen[p.Name()] = struct{}{}
+		chain = append(chain, p)
+	}
+
 	if p, ok := r.exactIndex[model]; ok {
-		return p, nil
+		add(p)
 	}
 	for _, rule := range r.globRules {
 		matched, err := path.Match(rule.pattern, model)
 		if err != nil {
 			// A malformed pattern should have been rejected at Load time;
-			// we skip rather than error so one broken rule doesn't block
+			// skip rather than error so one broken rule doesn't block
 			// resolution of others.
 			continue
 		}
 		if matched {
-			return rule.provider, nil
+			add(rule.provider)
 		}
 	}
-	if r.defaultProvider != nil {
-		return r.defaultProvider, nil
-	}
-	return nil, fmt.Errorf("%w: %q", ErrNoProviderForModel, model)
+	add(r.defaultProvider)
+	return chain
 }
 
 // Names returns all registered provider names in declaration order.

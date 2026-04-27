@@ -78,6 +78,30 @@ rate_limits: []
 #     window: 1h
 #     key_by: [api_key, model]
 
+# Router (Week 6): retry / fail-over / circuit-breaker decisions for upstream
+# calls. Defaults below match DefaultPolicy + DefaultBreakerSettings; rare
+# overrides only — most operators leave this section blank.
+router:
+  retry:
+    # Beyond the first call. 2 = up to 3 total attempts before failover.
+    max_retries: 2
+    # Wall-clock cap across the whole chain (retries + failover hops).
+    max_total: 30s
+    # Full-jitter exponential envelope: random ∈ [0, base * 2^(n-1)] capped
+    # at max_backoff. Retry-After from upstream trumps and is honored verbatim.
+    base_backoff: 100ms
+    max_backoff: 5s
+  breaker:
+    # Per-provider circuit breaker (sony/gobreaker two-step API). Trips when
+    # failure_ratio is met AND min_requests have been seen in the current
+    # rolling interval. Only retryable errors (5xx / timeout / rate-limit)
+    # count — 4xx (auth, invalid request) leave the breaker calm.
+    max_requests: 1       # half-open probe quota
+    interval: 60s         # closed-state counter window
+    timeout: 30s          # open → half-open transition
+    failure_ratio: 0.5
+    min_requests: 5
+
 cache:
   exact:
     enabled: true

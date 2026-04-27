@@ -28,6 +28,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/An-idd/x-beacon/internal/auth"
+	"github.com/An-idd/x-beacon/internal/router"
 	"github.com/An-idd/x-beacon/internal/provider/registry"
 	"github.com/An-idd/x-beacon/internal/server"
 	"github.com/An-idd/x-beacon/pkg/version"
@@ -128,9 +129,12 @@ providers:
 		}},
 	}
 
+	rtr := router.New(reg, router.DefaultPolicy(), zap.NewNop())
+
 	srv, err := server.New(server.Deps{
 		Logger:            zap.NewNop(),
 		Registry:          reg,
+		Router:            rtr,
 		Authn:             authn,
 		MetricsReg:        prometheus.NewRegistry(),
 		MetricsEnabled:    true,
@@ -441,6 +445,91 @@ func TestSmoke_Readyz_DBDown(t *testing.T) {
 	assert.Contains(t, body, "postgres unreachable")
 	// Redis still OK so its block must reflect that.
 	assert.Contains(t, body, `"redis":{"ok":true}`)
+}
+
+// TestSmoke_FailoverFromOpenAIToDeepseek verifies the Week 6 router's
+// fail-over wiring at the HTTP layer. Two openai-compatible providers
+// claim the same model: openai-mock as exact owner (primary) and
+// deepseek-fallback via glob (declared after, so it sits second in the
+// chain). When the OpenAI mock returns 503 on every call the router
+// exhausts retries, fails over to the deepseek mock, and the gateway
+// surfaces the second provider's response.
+func TestSmoke_FailoverFromOpenAIToDeepseek(t *testing.T) {
+	openaiCalls := atomic.Int32{}
+	openaiHandler := func(w http.ResponseWriter, _ *http.Request) {
+		openaiCalls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"error":{"message":"upstream down","type":"server_error"}}`)
+	}
+	deepseekCalls := atomic.Int32{}
+	deepseekHandler := func(w http.ResponseWriter, _ *http.Request) {
+		deepseekCalls.Add(1)
+		writeJSON(t, w, `{
+			"id":"chatcmpl-failover","object":"chat.completion","created":1714000000,"model":"gpt-4o",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"served-by-fallback"},"finish_reason":"stop"}],
+			"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
+		}`)
+	}
+
+	openai := httptest.NewServer(http.HandlerFunc(openaiHandler))
+	deepseek := httptest.NewServer(http.HandlerFunc(deepseekHandler))
+	defer openai.Close()
+	defer deepseek.Close()
+
+	yaml := fmt.Sprintf(`
+providers:
+  - name: openai-mock
+    type: openai
+    endpoint: %s
+    api_key: sk-openai-mock
+    models:
+      exact: ["gpt-4o"]
+  - name: deepseek-fallback
+    type: deepseek
+    endpoint: %s
+    api_key: sk-deepseek-mock
+    models:
+      glob: ["gpt-*"]
+`, openai.URL, deepseek.URL)
+
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "providers.yaml")
+	require.NoError(t, os.WriteFile(yamlPath, []byte(yaml), 0o600))
+	reg, err := registry.Load(yamlPath)
+	require.NoError(t, err)
+
+	const authKey = "sk-failover-test"
+	authn, err := auth.NewStatic([]auth.StaticEntry{{ID: "fo", Name: "Failover", Secret: authKey}})
+	require.NoError(t, err)
+
+	rtr := router.New(reg, router.DefaultPolicy(), zap.NewNop())
+	srv, err := server.New(server.Deps{
+		Logger:         zap.NewNop(),
+		Registry:       reg,
+		Router:         rtr,
+		Authn:          authn,
+		MetricsReg:     prometheus.NewRegistry(),
+		MetricsEnabled: true,
+		MetricsPath:    "/metrics",
+	})
+	require.NoError(t, err)
+	gateway := httptest.NewServer(srv.Handler())
+	defer gateway.Close()
+
+	req, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions",
+		bytes.NewReader(chatRequest("gpt-4o", false)))
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+authKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	require.Equal(t, http.StatusOK, resp.StatusCode, "body=%s", body)
+	assert.Contains(t, string(body), "served-by-fallback")
+	assert.GreaterOrEqual(t, openaiCalls.Load(), int32(1), "openai must have been tried at least once")
+	assert.EqualValues(t, 1, deepseekCalls.Load(), "deepseek (fallback) must have served exactly once")
 }
 
 func TestSmoke_UserAgentForwarded(t *testing.T) {

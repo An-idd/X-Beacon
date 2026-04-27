@@ -23,7 +23,31 @@ type Config struct {
 	ProvidersFile string              `mapstructure:"providers_file"`
 	Auth          AuthConfig          `mapstructure:"auth"`
 	RateLimits    []RateLimitRule     `mapstructure:"rate_limits"`
+	Router        RouterConfig        `mapstructure:"router"`
 	Cache         CacheConfig         `mapstructure:"cache"`
+}
+
+// RouterConfig tunes Week 6's retry / fail-over / circuit-breaker layer.
+// Zero values fall back to library defaults; only override when load
+// testing or operating against a flaky upstream surfaces a need.
+type RouterConfig struct {
+	Retry   RouterRetryConfig   `mapstructure:"retry"`
+	Breaker RouterBreakerConfig `mapstructure:"breaker"`
+}
+
+type RouterRetryConfig struct {
+	MaxRetries  int           `mapstructure:"max_retries"`
+	MaxTotal    time.Duration `mapstructure:"max_total"`
+	BaseBackoff time.Duration `mapstructure:"base_backoff"`
+	MaxBackoff  time.Duration `mapstructure:"max_backoff"`
+}
+
+type RouterBreakerConfig struct {
+	MaxRequests  uint32        `mapstructure:"max_requests"`
+	Interval     time.Duration `mapstructure:"interval"`
+	Timeout      time.Duration `mapstructure:"timeout"`
+	FailureRatio float64       `mapstructure:"failure_ratio"`
+	MinRequests  uint32        `mapstructure:"min_requests"`
 }
 
 // AuthConfig holds settings for the API-key auth path. Step 4.4 introduces
@@ -168,6 +192,16 @@ func setDefaults(v *viper.Viper) {
 
 	v.SetDefault("auth.cache.positive_ttl", 60*time.Second)
 	v.SetDefault("auth.cache.negative_ttl", 5*time.Second)
+
+	v.SetDefault("router.retry.max_retries", 2)
+	v.SetDefault("router.retry.max_total", 30*time.Second)
+	v.SetDefault("router.retry.base_backoff", 100*time.Millisecond)
+	v.SetDefault("router.retry.max_backoff", 5*time.Second)
+	v.SetDefault("router.breaker.max_requests", 1)
+	v.SetDefault("router.breaker.interval", 60*time.Second)
+	v.SetDefault("router.breaker.timeout", 30*time.Second)
+	v.SetDefault("router.breaker.failure_ratio", 0.5)
+	v.SetDefault("router.breaker.min_requests", 5)
 
 	v.SetDefault("providers_file", "configs/providers.yaml")
 
