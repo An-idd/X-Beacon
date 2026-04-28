@@ -3,12 +3,15 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"go.uber.org/zap"
 
+	"github.com/An-idd/x-beacon/internal/billing"
 	"github.com/An-idd/x-beacon/internal/provider"
 	"github.com/An-idd/x-beacon/internal/router"
 	"github.com/An-idd/x-beacon/internal/server/sse"
+	"github.com/An-idd/x-beacon/pkg/tokenizer"
 )
 
 // handleChatStream owns the streaming branch of /v1/chat/completions.
@@ -30,10 +33,18 @@ func handleChatStream(
 	w http.ResponseWriter,
 	r *http.Request,
 	rtr *router.Router,
+	tk *tokenizer.Selector,
+	bill *billing.Worker,
 	req *provider.ChatRequest,
+	started time.Time,
 	logger *zap.Logger,
 	reqID string,
 ) {
+	// streamStats accumulates the data we need at the end of the stream
+	// to emit a billing event. Updated as chunks flow.
+	var stats streamStats
+	stats.provider = ""
+
 	ch, err := rtr.ChatCompletionStream(r.Context(), req)
 	if err != nil {
 		m := mapProviderError(err)
@@ -43,6 +54,16 @@ func handleChatStream(
 			zap.Int("status", m.Status),
 			zap.Error(err))
 		writeError(w, m, reqID)
+		emitBillingEvent(bill, billing.Event{
+			StartedAt: started,
+			RequestID: reqID,
+			APIKeyID:  apiKeyIDFrom(r),
+			Model:     req.Model,
+			Status:    m.Status,
+			Streamed:  true,
+			LatencyMs: int(time.Since(started).Milliseconds()),
+			ErrorCode: m.Code,
+		})
 		return
 	}
 
@@ -61,11 +82,18 @@ func handleChatStream(
 	stopHB := sw.StartHeartbeat(r.Context(), streamHeartbeatInterval)
 	defer stopHB()
 
+	finalStatus := http.StatusOK
+	var errCode string
 	for ev := range ch {
 		if ev.Err != nil {
+			m := mapProviderError(ev.Err)
+			finalStatus = m.Status
+			errCode = m.Code
 			emitStreamError(sw, ev.Err, req.Model, reqID, logger)
-			return
+			break
 		}
+
+		stats.observe(ev.Chunk)
 
 		data, err := json.Marshal(ev.Chunk)
 		if err != nil {
@@ -75,8 +103,10 @@ func handleChatStream(
 				zap.Error(err))
 			// Same envelope as a mid-stream error: client gets one bad event
 			// instead of a silently truncated stream.
+			finalStatus = http.StatusInternalServerError
+			errCode = "internal_error"
 			emitStreamError(sw, err, req.Model, reqID, logger)
-			return
+			break
 		}
 
 		if err := sw.WriteData(data); err != nil {
@@ -85,16 +115,81 @@ func handleChatStream(
 			logger.Debug("stream write failed; ending",
 				zap.String("req_id", reqID),
 				zap.Error(err))
-			return
+			break
 		}
 	}
 
 	// Channel closed naturally. If ctx was canceled (client gone), skip the
 	// terminal marker — the connection is dead anyway.
-	if r.Context().Err() != nil {
+	if r.Context().Err() == nil && finalStatus == http.StatusOK {
+		_ = sw.WriteData(doneMarker)
+	}
+
+	prompt, completion := stats.tokenCounts(tk, req)
+	emitBillingEvent(bill, billing.Event{
+		StartedAt:        started,
+		RequestID:        reqID,
+		APIKeyID:         apiKeyIDFrom(r),
+		Provider:         stats.provider,
+		Model:            req.Model,
+		PromptTokens:     prompt,
+		CompletionTokens: completion,
+		LatencyMs:        int(time.Since(started).Milliseconds()),
+		Status:           finalStatus,
+		Streamed:         true,
+		ErrorCode:        errCode,
+	})
+}
+
+// streamStats accumulates per-stream observations used at end-of-stream
+// to compute the billing event. Tracking is best-effort: we capture
+// upstream-supplied Usage when present (Anthropic always; OpenAI when
+// stream_options.include_usage is set) and otherwise fall back to a
+// tokenizer running over the concatenated content.
+type streamStats struct {
+	provider     string
+	contentBuf   string // accumulated assistant content for tokenizer fallback
+	promptUsage  int
+	outputUsage  int
+}
+
+func (s *streamStats) observe(chunk *provider.ChatStreamChunk) {
+	if chunk == nil {
 		return
 	}
-	_ = sw.WriteData(doneMarker)
+	if chunk.Usage != nil {
+		// Provider sent usage. Last-write-wins; some providers send a
+		// running tally, others only at the terminal chunk.
+		if chunk.Usage.PromptTokens > 0 {
+			s.promptUsage = chunk.Usage.PromptTokens
+		}
+		if chunk.Usage.CompletionTokens > 0 {
+			s.outputUsage = chunk.Usage.CompletionTokens
+		}
+	}
+	for _, ch := range chunk.Choices {
+		if ch.Delta.Content != "" {
+			s.contentBuf += ch.Delta.Content
+		}
+	}
+}
+
+// tokenCounts returns (prompt, completion) for the stream's billing
+// event. Prefers usage observed mid-stream; falls back to tokenizer
+// estimates over the prompt and the accumulated assistant content.
+func (s *streamStats) tokenCounts(tk *tokenizer.Selector, req *provider.ChatRequest) (int, int) {
+	prompt, completion := s.promptUsage, s.outputUsage
+	if tk == nil {
+		return prompt, completion
+	}
+	t := tk.For(req.Model)
+	if prompt == 0 {
+		prompt = t.CountMessages(req.Messages)
+	}
+	if completion == 0 {
+		completion = t.CountText(s.contentBuf)
+	}
+	return prompt, completion
 }
 
 // doneMarker is the OpenAI-canonical end-of-stream sentinel. Written as

@@ -24,7 +24,22 @@ type Config struct {
 	Auth          AuthConfig          `mapstructure:"auth"`
 	RateLimits    []RateLimitRule     `mapstructure:"rate_limits"`
 	Router        RouterConfig        `mapstructure:"router"`
+	Billing       BillingConfig       `mapstructure:"billing"`
 	Cache         CacheConfig         `mapstructure:"cache"`
+}
+
+// BillingConfig configures the async request_logs writer + pricing
+// cache. Both sub-blocks have safe defaults; production usually only
+// changes pricing_reload_interval after observing operational pain.
+type BillingConfig struct {
+	Worker                BillingWorkerConfig `mapstructure:"worker"`
+	PricingReloadInterval time.Duration       `mapstructure:"pricing_reload_interval"`
+}
+
+type BillingWorkerConfig struct {
+	BufferSize   int           `mapstructure:"buffer_size"`
+	Workers      int           `mapstructure:"workers"`
+	FlushTimeout time.Duration `mapstructure:"flush_timeout"`
 }
 
 // RouterConfig tunes Week 6's retry / fail-over / circuit-breaker layer.
@@ -202,6 +217,11 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("router.breaker.timeout", 30*time.Second)
 	v.SetDefault("router.breaker.failure_ratio", 0.5)
 	v.SetDefault("router.breaker.min_requests", 5)
+
+	v.SetDefault("billing.worker.buffer_size", 10000)
+	v.SetDefault("billing.worker.workers", 2)
+	v.SetDefault("billing.worker.flush_timeout", 5*time.Second)
+	v.SetDefault("billing.pricing_reload_interval", 30*time.Minute)
 
 	v.SetDefault("providers_file", "configs/providers.yaml")
 

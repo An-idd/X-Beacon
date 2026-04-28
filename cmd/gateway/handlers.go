@@ -11,13 +11,64 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/An-idd/x-beacon/internal/auth"
+	"github.com/An-idd/x-beacon/internal/billing"
 	"github.com/An-idd/x-beacon/internal/config"
 	"github.com/An-idd/x-beacon/internal/provider/registry"
 	"github.com/An-idd/x-beacon/internal/ratelimit"
 	"github.com/An-idd/x-beacon/internal/router"
 	"github.com/An-idd/x-beacon/internal/server"
 	"github.com/An-idd/x-beacon/internal/storage"
+	"github.com/An-idd/x-beacon/pkg/tokenizer"
 )
+
+// buildTokenizer constructs the multi-family tokenizer Selector once at
+// startup. Lifetime is process-wide; the embedded BPE vocab loads on
+// first call and is reused thereafter.
+func buildTokenizer(logger *zap.Logger) (*tokenizer.Selector, error) {
+	sel, err := tokenizer.NewSelector()
+	if err != nil {
+		return nil, err
+	}
+	logger.Info("tokenizer ready", zap.String("families", "openai-cl100k, anthropic-approx"))
+	return sel, nil
+}
+
+// buildBilling constructs the async billing worker + its pricing cache
+// when DB is available. nil pool (dev mode) returns three nils — chat
+// handlers will skip event emission and /admin/pricing won't be mounted.
+//
+// The pricing cache is started under the gateway ctx so its periodic
+// reload goroutine winds down with the rest of the process. The worker
+// itself is stopped explicitly in main's defer chain to flush in-flight
+// events.
+func buildBilling(ctx context.Context, cfg *config.Config, pool *storage.Pool, logger *zap.Logger) (*billing.Worker, *billing.PricingCache, error) {
+	if pool == nil {
+		logger.Warn("DB not configured; billing disabled",
+			zap.String("hint", "set database.dsn in config.yaml to enable request_logs + pricing"))
+		return nil, nil, nil
+	}
+	pricing := billing.NewPricingCache(pool, logger)
+	if err := pricing.Reload(ctx); err != nil {
+		// Non-fatal: gateway runs but events record zero cost until DB recovers.
+		logger.Warn("initial pricing reload failed; events will record zero cost",
+			zap.Error(err))
+	}
+	pricing.PeriodicReload(ctx, cfg.Billing.PricingReloadInterval)
+
+	w, err := billing.NewWorker(pool, pricing, billing.WorkerConfig{
+		BufferSize:   cfg.Billing.Worker.BufferSize,
+		Workers:      cfg.Billing.Worker.Workers,
+		FlushTimeout: cfg.Billing.Worker.FlushTimeout,
+	}, logger)
+	if err != nil {
+		return nil, nil, err
+	}
+	w.Start(ctx)
+	logger.Info("billing worker ready",
+		zap.Int("buffer", cfg.Billing.Worker.BufferSize),
+		zap.Int("workers", cfg.Billing.Worker.Workers))
+	return w, pricing, nil
+}
 
 // buildRouter constructs the Week 6 retry/failover/breaker layer. It pulls
 // RetryPolicy + BreakerSettings from cfg.Router and wires them around the

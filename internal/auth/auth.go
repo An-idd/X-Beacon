@@ -39,6 +39,29 @@ type Principal struct {
 
 	// Name is a human-readable label (e.g. "Local development"). Safe to log.
 	Name string
+
+	// Scopes carries the JSONB `scopes` column (Week 4 schema reserved
+	// it for forward use). Convention: top-level keys are categories
+	// ("admin", "rate"), values are arrays of allowed verbs/resources.
+	// Example: {"admin": ["pricing"]} grants /admin/pricing access.
+	// nil for keys created before the scope feature; HasScope handles
+	// nil receivers safely.
+	Scopes map[string][]string
+}
+
+// HasScope reports whether the principal carries `value` (or the
+// wildcard "*") under the given category. nil-safe so handlers can
+// `auth.PrincipalFrom(ctx).HasScope(...)` without prior nil check.
+func (p *Principal) HasScope(category, value string) bool {
+	if p == nil {
+		return false
+	}
+	for _, v := range p.Scopes[category] {
+		if v == "*" || v == value {
+			return true
+		}
+	}
+	return false
 }
 
 // Authenticator validates a raw bearer token and returns the Principal it

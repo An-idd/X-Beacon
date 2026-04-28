@@ -5,10 +5,12 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,12 +27,33 @@ const secretPrefix = "sk-"
 // base64url-no-pad → 46 chars including the prefix. Comparable to OpenAI.
 const secretBytes = 32
 
+// scopeFlag accumulates -scope category:value occurrences. Multiple
+// values per category collapse into one array.
+type scopeFlag map[string][]string
+
+func (s *scopeFlag) String() string { return fmt.Sprintf("%v", map[string][]string(*s)) }
+
+func (s *scopeFlag) Set(raw string) error {
+	idx := strings.IndexByte(raw, ':')
+	if idx <= 0 || idx == len(raw)-1 {
+		return fmt.Errorf("invalid scope %q (expected category:value)", raw)
+	}
+	if *s == nil {
+		*s = scopeFlag{}
+	}
+	cat, val := raw[:idx], raw[idx+1:]
+	(*s)[cat] = append((*s)[cat], val)
+	return nil
+}
+
 func runKeygen(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("keygen", flag.ContinueOnError)
 	fs.SetOutput(stdout)
 	in := registerDSNFlags(fs)
 	name := fs.String("name", "", "human-readable label for the key (required)")
 	idFlag := fs.String("id", "", "explicit key ID; default is a fresh UUIDv4")
+	scopes := scopeFlag{}
+	fs.Var(&scopes, "scope", "grant scope category:value (repeatable; e.g. -scope admin:pricing)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -55,6 +78,14 @@ func runKeygen(args []string, stdout io.Writer) error {
 	}
 	hash := sha256.Sum256([]byte(secret))
 
+	scopesJSON := []byte(`{}`)
+	if len(scopes) > 0 {
+		scopesJSON, err = json.Marshal(scopes)
+		if err != nil {
+			return fmt.Errorf("encode scopes: %w", err)
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	pool, err := storage.NewPool(ctx, storage.Config{DSN: dsn, MaxConns: 2})
@@ -64,8 +95,8 @@ func runKeygen(args []string, stdout io.Writer) error {
 	defer pool.Close()
 
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO api_keys (id, key_hash, name) VALUES ($1, $2, $3)`,
-		id, hash[:], *name,
+		`INSERT INTO api_keys (id, key_hash, name, scopes) VALUES ($1, $2, $3, $4)`,
+		id, hash[:], *name, scopesJSON,
 	); err != nil {
 		return fmt.Errorf("insert api_key: %w", err)
 	}
@@ -75,6 +106,9 @@ func runKeygen(args []string, stdout io.Writer) error {
 	fmt.Fprintf(stdout, "Created API key.\n")
 	fmt.Fprintf(stdout, "  id:     %s\n", id)
 	fmt.Fprintf(stdout, "  name:   %s\n", *name)
+	if len(scopes) > 0 {
+		fmt.Fprintf(stdout, "  scopes: %s\n", scopesJSON)
+	}
 	fmt.Fprintf(stdout, "  secret: %s\n", secret)
 	fmt.Fprintf(stdout, "\nThis secret is shown ONLY ONCE. Store it now; the gateway never displays it again.\n")
 	return nil

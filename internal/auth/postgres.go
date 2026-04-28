@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -52,12 +53,13 @@ func (a *PostgresAuthenticator) Authenticate(ctx context.Context, key string) (*
 		   SET last_used_at = now()
 		 WHERE key_hash = $1
 		   AND revoked_at IS NULL
-		RETURNING id, name`
+		RETURNING id, name, scopes`
 
 	hash := hashKeyBytes(key)
 
 	var p Principal
-	err := a.pool.QueryRow(ctx, q, hash).Scan(&p.ID, &p.Name)
+	var scopesRaw []byte
+	err := a.pool.QueryRow(ctx, q, hash).Scan(&p.ID, &p.Name, &scopesRaw)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return nil, ErrInvalidCredentials
@@ -65,6 +67,13 @@ func (a *PostgresAuthenticator) Authenticate(ctx context.Context, key string) (*
 		// Wrap so callers can errors.Is for ErrInvalidCredentials without
 		// false-matching DB errors. Middleware logs at warn and returns 500.
 		return nil, fmt.Errorf("auth: query api_keys: %w", err)
+	}
+	// scopes column defaults to '{}'; tolerate empty / null so old rows
+	// without the feature don't cause auth failures.
+	if len(scopesRaw) > 0 && string(scopesRaw) != "{}" && string(scopesRaw) != "null" {
+		if err := json.Unmarshal(scopesRaw, &p.Scopes); err != nil {
+			return nil, fmt.Errorf("auth: decode scopes for %q: %w", p.ID, err)
+		}
 	}
 	return &p, nil
 }

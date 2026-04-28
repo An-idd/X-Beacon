@@ -102,6 +102,28 @@ router:
     failure_ratio: 0.5
     min_requests: 5
 
+# Billing (Week 7): async request_logs writer + model_pricing reload.
+# Defaults match production. Decrease worker.workers / buffer_size when
+# request volume is light (saves goroutines + memory).
+billing:
+  worker:
+    # Channel capacity. Full buffer drops events to keep the chat hot
+    # path zero-blocking; drops are counted via DroppedCount() and will
+    # be exposed as a Prometheus metric in Week 8.
+    buffer_size: 10000
+    # Consumer goroutines pulling from the channel. >1 lets a slow DB
+    # not stall the queue; insertion order is no longer strictly
+    # start-time monotonic but reports use started_at not id.
+    workers: 2
+    # Stop() drains for at most this long; remaining events are lost.
+    flush_timeout: 5s
+  # How often to refresh PricingCache from model_pricing. The HTTP
+  # admin API + xbctl pricing both call cache.Set/Delete which
+  # immediately update the in-memory snapshot of the writing instance —
+  # this interval is the bottom-line consistency guarantee for
+  # multi-instance deployments.
+  pricing_reload_interval: 30m
+
 cache:
   exact:
     enabled: true

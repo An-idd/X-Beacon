@@ -57,6 +57,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return runKeyrevoke(rest, stdout)
 	case "migrate":
 		return runMigrate(rest, stdout)
+	case "pricing":
+		return runPricing(rest, stdout)
 	default:
 		printUsage(stderr)
 		return fmt.Errorf("unknown subcommand %q", sub)
@@ -74,6 +76,7 @@ Subcommands:
   keylist    List configured API keys
   keyrevoke  Mark an API key as revoked
   migrate    Apply schema migrations: up | down | version
+  pricing    Manage model_pricing: list | set | delete
 
 Common flags (all DB-touching subcommands):
   -config PATH    Read database.dsn from this config.yaml (default: configs/config.yaml)

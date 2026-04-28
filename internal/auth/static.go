@@ -58,7 +58,7 @@ func NewStatic(entries []StaticEntry) (*StaticAuthenticator, error) {
 			errs = append(errs, fmt.Errorf("auth: entry[%d] %q: secret collides with id %q", i, e.ID, existing.ID))
 			continue
 		}
-		byHash[hash] = &Principal{ID: e.ID, Name: e.Name}
+		byHash[hash] = &Principal{ID: e.ID, Name: e.Name, Scopes: e.Scopes}
 	}
 
 	if len(errs) > 0 {
@@ -72,6 +72,9 @@ type StaticEntry struct {
 	ID     string
 	Name   string
 	Secret string
+	// Scopes mirrors Principal.Scopes; tests use this to grant
+	// admin:pricing access without spinning up a Postgres.
+	Scopes map[string][]string
 }
 
 // Authenticate looks up a Principal by SHA-256 of the supplied key.

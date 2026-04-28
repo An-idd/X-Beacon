@@ -133,10 +133,26 @@ func runWithCtx(ctx context.Context, args []string, stdout *os.File) error {
 
 	rtr := buildRouter(cfg, reg, logger)
 
+	tk, err := buildTokenizer(logger)
+	if err != nil {
+		return fmt.Errorf("init tokenizer: %w", err)
+	}
+
+	billingWorker, pricingCache, err := buildBilling(ctx, cfg, pool, logger)
+	if err != nil {
+		return fmt.Errorf("init billing: %w", err)
+	}
+	if billingWorker != nil {
+		defer billingWorker.Stop(context.Background())
+	}
+
 	srv, err := server.New(server.Deps{
 		Logger:            logger,
 		Registry:          reg,
 		Router:            rtr,
+		Tokenizer:         tk,
+		Billing:           billingWorker,
+		Pricing:           pricingCache,
 		Authn:             authn,
 		RateLimiter:       rateLimiter,
 		MetricsReg:        metricsReg,

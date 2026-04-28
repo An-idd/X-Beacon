@@ -15,10 +15,12 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/An-idd/x-beacon/internal/auth"
+	"github.com/An-idd/x-beacon/internal/billing"
 	"github.com/An-idd/x-beacon/internal/provider/registry"
 	"github.com/An-idd/x-beacon/internal/ratelimit"
 	"github.com/An-idd/x-beacon/internal/router"
 	"github.com/An-idd/x-beacon/internal/server/middleware"
+	"github.com/An-idd/x-beacon/pkg/tokenizer"
 )
 
 // Deps groups everything the server needs from main. New dependencies added
@@ -44,6 +46,22 @@ type Deps struct {
 	// Required when chat handlers are mounted (i.e. always in the current
 	// route surface); nil triggers a missing-dep error in New.
 	Router *router.Router
+
+	// Tokenizer selects the right token-counting implementation per
+	// model id (cl100k_base for OpenAI/DeepSeek, scaled approximation
+	// for Anthropic). Optional — nil disables prompt-token attribution
+	// in billing events; the worker will record zero token counts.
+	Tokenizer *tokenizer.Selector
+
+	// Billing accepts request events asynchronously. Optional — nil
+	// disables billing entirely (events go nowhere); chat handlers
+	// continue to serve traffic unaffected.
+	Billing *billing.Worker
+
+	// Pricing is the in-memory model→rate cache. When non-nil, the
+	// /admin/pricing routes are mounted and protected by the
+	// admin:pricing scope. Optional in dev mode.
+	Pricing *billing.PricingCache
 
 	// ReadinessCheckers feed /readyz. Order is preserved in the JSON body
 	// for stable parsing. nil/empty makes /readyz a trivial 200.
@@ -126,8 +144,20 @@ func New(deps Deps) (*Server, error) {
 		// (returns {"object":"list","data":[]}) so the gateway boots even when
 		// providers.yaml is absent.
 		v1.Get("/models", modelsHandler(deps.Registry))
-		v1.Post("/chat/completions", chatCompletionsHandler(deps.Router, deps.Logger))
+		v1.Post("/chat/completions", chatCompletionsHandler(deps.Router, deps.Tokenizer, deps.Billing, deps.Logger))
 	})
+
+	// /admin/* requires both Auth (so we have a Principal) and the
+	// admin:pricing scope on it. Mounted only when a PricingCache was
+	// supplied — dev-mode boots without DB still serve /v1/* but skip
+	// the admin surface.
+	if deps.Pricing != nil && deps.Authn != nil {
+		r.Route("/admin/pricing", func(adm chi.Router) {
+			adm.Use(middleware.Auth(deps.Authn, deps.Logger))
+			adm.Use(middleware.RequireScope("admin", "pricing", deps.Logger))
+			adm.Mount("/", adminPricingHandlers(deps.Pricing, deps.Logger))
+		})
+	}
 
 	if deps.MetricsEnabled {
 		r.Handle(deps.MetricsPath, promhttp.HandlerFor(
