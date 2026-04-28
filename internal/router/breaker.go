@@ -8,6 +8,7 @@ import (
 	"github.com/sony/gobreaker/v2"
 	"go.uber.org/zap"
 
+	"github.com/An-idd/x-beacon/internal/observability"
 	"github.com/An-idd/x-beacon/internal/provider"
 )
 
@@ -78,18 +79,20 @@ func (s *BreakerSettings) applyDefaults() {
 type breakerPool struct {
 	settings BreakerSettings
 	logger   *zap.Logger
+	metrics  *observability.Metrics // nil-safe; SetBreakerState handles nil
 
 	mu sync.Mutex
 	bs map[string]*gobreaker.TwoStepCircuitBreaker[any]
 }
 
 // newBreakerPool constructs a pool. Pools are created lazily per provider
-// on first Allow().
-func newBreakerPool(settings BreakerSettings, logger *zap.Logger) *breakerPool {
+// on first Allow(). metrics may be nil (dev mode).
+func newBreakerPool(settings BreakerSettings, logger *zap.Logger, metrics *observability.Metrics) *breakerPool {
 	settings.applyDefaults()
 	return &breakerPool{
 		settings: settings,
 		logger:   logger,
+		metrics:  metrics,
 		bs:       make(map[string]*gobreaker.TwoStepCircuitBreaker[any]),
 	}
 }
@@ -136,6 +139,7 @@ func (p *breakerPool) get(name string) *gobreaker.TwoStepCircuitBreaker[any] {
 					zap.String("from", from.String()),
 					zap.String("to", to.String()))
 			}
+			p.metrics.SetBreakerState(name, breakerStateCode(to))
 		},
 	})
 	p.bs[name] = cb
@@ -147,6 +151,23 @@ func (p *breakerPool) get(name string) *gobreaker.TwoStepCircuitBreaker[any] {
 // failover-eligible signals (akin to provider.ErrUnavailable).
 func isBreakerError(err error) bool {
 	return errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests)
+}
+
+// breakerStateCode maps gobreaker's State enum to the integer codes
+// the Prometheus gauge uses (closed=0, half-open=1, open=2). Kept
+// explicit (not a direct cast) because gobreaker's enum values are
+// implementation detail; we own the wire format.
+func breakerStateCode(s gobreaker.State) int {
+	switch s {
+	case gobreaker.StateClosed:
+		return 0
+	case gobreaker.StateHalfOpen:
+		return 1
+	case gobreaker.StateOpen:
+		return 2
+	default:
+		return -1
+	}
 }
 
 // breakerObservation translates a provider call error into the breaker's

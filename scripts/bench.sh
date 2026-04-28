@@ -60,4 +60,32 @@ vegeta attack -targets="$TARGETS" -rate="$RATE" -duration="$DURATION" -keepalive
   | vegeta report -type=text
 
 echo
-echo "Done. M1 acceptance target: P99 < 10ms on the cache-warm /v1/models row."
+
+# /v1/chat/completions: full hot path — Auth + RateLimit + Router +
+# tokenizer + provider call (mock) + billing enqueue. Measures the
+# realistic "what does an API consumer actually feel" latency.
+#
+# Requires the gateway to be configured with a mock-OpenAI upstream.
+# Set MOCK_MODEL to a model that resolves to that upstream.
+MOCK_MODEL="${MOCK_MODEL:-gpt-4o-mini}"
+echo "## /v1/chat/completions (full hot path, mock upstream, model=$MOCK_MODEL)"
+CHAT_BODY="${CHAT_BODY:-$(printf '{"model":"%s","messages":[{"role":"user","content":"ping"}]}' "$MOCK_MODEL")}"
+CHAT_TARGETS=$(mktemp)
+trap 'rm -f "$TARGETS" "$CHAT_TARGETS"' EXIT
+{
+  printf 'POST %s/v1/chat/completions\nAuthorization: Bearer %s\nContent-Type: application/json\n@-\n%s\n' \
+    "$TARGET_HOST" "$GATEWAY_KEY" "$CHAT_BODY"
+} > "$CHAT_TARGETS"
+
+# Warm-up to populate caches (auth / pricing) so the recorded run is
+# representative of steady-state.
+vegeta attack -targets="$CHAT_TARGETS" -rate="$RATE" -duration="5s" -keepalive=true \
+  >/dev/null
+
+vegeta attack -targets="$CHAT_TARGETS" -rate="$RATE" -duration="$DURATION" -keepalive=true \
+  | vegeta report -type=text
+
+echo
+echo "Acceptance lines:"
+echo "  M1 (Phase 1): P99 < 10ms on cache-warm /v1/models                       — Week 4"
+echo "  M2 (Phase 2): P99 < 20ms on /v1/chat/completions (auth+billing+mock up) — Week 8"

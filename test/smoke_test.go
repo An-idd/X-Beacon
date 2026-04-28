@@ -28,6 +28,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/An-idd/x-beacon/internal/auth"
+	"github.com/An-idd/x-beacon/internal/observability"
 	"github.com/An-idd/x-beacon/internal/router"
 	"github.com/An-idd/x-beacon/internal/provider/registry"
 	"github.com/An-idd/x-beacon/internal/server"
@@ -502,13 +503,17 @@ providers:
 	authn, err := auth.NewStatic([]auth.StaticEntry{{ID: "fo", Name: "Failover", Secret: authKey}})
 	require.NoError(t, err)
 
-	rtr := router.New(reg, router.DefaultPolicy(), zap.NewNop())
+	metricsReg := prometheus.NewRegistry()
+	metrics, err := observability.NewMetrics(metricsReg)
+	require.NoError(t, err)
+	rtr := router.New(reg, router.DefaultPolicy(), zap.NewNop(), router.WithMetrics(metrics))
 	srv, err := server.New(server.Deps{
 		Logger:         zap.NewNop(),
 		Registry:       reg,
 		Router:         rtr,
 		Authn:          authn,
-		MetricsReg:     prometheus.NewRegistry(),
+		Metrics:        metrics,
+		MetricsReg:     metricsReg,
 		MetricsEnabled: true,
 		MetricsPath:    "/metrics",
 	})
@@ -530,6 +535,18 @@ providers:
 	assert.Contains(t, string(body), "served-by-fallback")
 	assert.GreaterOrEqual(t, openaiCalls.Load(), int32(1), "openai must have been tried at least once")
 	assert.EqualValues(t, 1, deepseekCalls.Load(), "deepseek (fallback) must have served exactly once")
+
+	// M2 acceptance: failover must surface as a metric increment, not just
+	// a log line. Scrape /metrics and assert the counter fired at least
+	// once for the openai-mock → deepseek-fallback hop.
+	scrapeReq, _ := http.NewRequest(http.MethodGet, gateway.URL+"/metrics", nil)
+	scrapeResp, err := http.DefaultClient.Do(scrapeReq)
+	require.NoError(t, err)
+	defer scrapeResp.Body.Close()
+	scrape, _ := io.ReadAll(scrapeResp.Body)
+	assert.Contains(t, string(scrape),
+		`gateway_router_failover_total{from="openai-mock",to="deepseek-fallback"}`,
+		"failover counter must surface in /metrics")
 }
 
 func TestSmoke_UserAgentForwarded(t *testing.T) {

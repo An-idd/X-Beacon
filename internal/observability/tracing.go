@@ -5,12 +5,26 @@ import (
 	"fmt"
 	"time"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// TracerName is the otel.Tracer instrumentation name shared by every
+// gateway-emitted span. Centralized so dashboards / alerting can scope
+// to it with a single string match.
+const TracerName = "github.com/An-idd/x-beacon"
+
+// Tracer returns the gateway's named tracer from the global provider.
+// Callers should reuse it within a function rather than calling at
+// each span site (the tracer object is cheap but allocation-aware).
+func Tracer() trace.Tracer {
+	return otel.Tracer(TracerName)
+}
 
 type TracingConfig struct {
 	Enabled     bool

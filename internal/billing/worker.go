@@ -9,6 +9,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/An-idd/x-beacon/internal/observability"
 	"github.com/An-idd/x-beacon/internal/storage"
 )
 
@@ -63,6 +64,7 @@ func DefaultWorkerConfig() WorkerConfig {
 type Worker struct {
 	pool    *storage.Pool
 	pricing *PricingCache
+	metrics *observability.Metrics // nil-safe
 	logger  *zap.Logger
 	cfg     WorkerConfig
 
@@ -72,8 +74,8 @@ type Worker struct {
 
 	// Partition cache: month "2026-04" → already ensured. Avoids
 	// CREATE TABLE IF NOT EXISTS DDL on every event.
-	partMu  sync.Mutex
-	partOK  map[string]struct{}
+	partMu sync.Mutex
+	partOK map[string]struct{}
 
 	startOnce sync.Once
 	stopOnce  sync.Once
@@ -83,7 +85,8 @@ type Worker struct {
 // NewWorker constructs (but does not start) a worker. pricing may be
 // nil — events from un-priced models will record zero cost. pool must
 // be non-nil; the worker is the only consumer of request_logs writes.
-func NewWorker(pool *storage.Pool, pricing *PricingCache, cfg WorkerConfig, logger *zap.Logger) (*Worker, error) {
+// metrics is optional; nil disables Prometheus instrumentation.
+func NewWorker(pool *storage.Pool, pricing *PricingCache, metrics *observability.Metrics, cfg WorkerConfig, logger *zap.Logger) (*Worker, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("billing: worker requires a non-nil pool")
 	}
@@ -99,6 +102,7 @@ func NewWorker(pool *storage.Pool, pricing *PricingCache, cfg WorkerConfig, logg
 	return &Worker{
 		pool:    pool,
 		pricing: pricing,
+		metrics: metrics,
 		logger:  logger,
 		cfg:     cfg,
 		ch:      make(chan Event, cfg.BufferSize),
@@ -135,6 +139,7 @@ func (w *Worker) Enqueue(e Event) bool {
 		return true
 	default:
 		w.dropped.Add(1)
+		w.metrics.IncBillingDropped()
 		return false
 	}
 }
@@ -255,6 +260,8 @@ func (w *Worker) persist(ctx context.Context, ev Event) {
 		return
 	}
 	w.written.Add(1)
+	w.metrics.IncBillingWritten()
+	w.metrics.AddCost(ev.Provider, ev.Model, ev.APIKeyID, totalMicro)
 }
 
 // ensurePartition creates the month-partition for ts if it doesn't yet

@@ -6,9 +6,12 @@ import (
 	"net/http"
 	"strings"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.uber.org/zap"
 
 	"github.com/An-idd/x-beacon/internal/auth"
+	"github.com/An-idd/x-beacon/internal/observability"
 )
 
 // Auth is middleware that requires a valid bearer token on every request
@@ -33,8 +36,11 @@ func Auth(authn auth.Authenticator, logger *zap.Logger) func(http.Handler) http.
 				return
 			}
 
-			principal, err := authn.Authenticate(r.Context(), key)
+			authCtx, span := observability.Tracer().Start(r.Context(), "auth.authenticate")
+			principal, err := authn.Authenticate(authCtx, key)
 			if err != nil {
+				span.SetStatus(codes.Error, err.Error())
+				span.End()
 				switch {
 				case errors.Is(err, auth.ErrMissingCredentials):
 					writeAuthError(w, http.StatusUnauthorized, "missing_credentials",
@@ -53,6 +59,8 @@ func Auth(authn auth.Authenticator, logger *zap.Logger) func(http.Handler) http.
 					zap.String("path", r.URL.Path))
 				return
 			}
+			span.SetAttributes(attribute.String("principal.id", principal.ID))
+			span.End()
 
 			ctx := auth.WithPrincipal(r.Context(), principal)
 			next.ServeHTTP(w, r.WithContext(ctx))

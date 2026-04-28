@@ -47,7 +47,7 @@ func newMulti(rules ...*stubLimiter) *ratelimit.Multi {
 // chain wraps the handler with RequestID + RateLimit so tests can assert
 // the X-Request-ID context plumbing along with rate-limit behavior.
 func chain(authnPrincipal *auth.Principal, h http.Handler, m *ratelimit.Multi) http.Handler {
-	rl := RateLimit(m, zap.NewNop())(h)
+	rl := RateLimit(m, nil, zap.NewNop())(h)
 	if authnPrincipal != nil {
 		// Inject Principal so api_key-keyed rules see it.
 		injected := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

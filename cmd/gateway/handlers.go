@@ -13,6 +13,7 @@ import (
 	"github.com/An-idd/x-beacon/internal/auth"
 	"github.com/An-idd/x-beacon/internal/billing"
 	"github.com/An-idd/x-beacon/internal/config"
+	"github.com/An-idd/x-beacon/internal/observability"
 	"github.com/An-idd/x-beacon/internal/provider/registry"
 	"github.com/An-idd/x-beacon/internal/ratelimit"
 	"github.com/An-idd/x-beacon/internal/router"
@@ -41,13 +42,14 @@ func buildTokenizer(logger *zap.Logger) (*tokenizer.Selector, error) {
 // reload goroutine winds down with the rest of the process. The worker
 // itself is stopped explicitly in main's defer chain to flush in-flight
 // events.
-func buildBilling(ctx context.Context, cfg *config.Config, pool *storage.Pool, logger *zap.Logger) (*billing.Worker, *billing.PricingCache, error) {
+func buildBilling(ctx context.Context, cfg *config.Config, pool *storage.Pool, metrics *observability.Metrics, logger *zap.Logger) (*billing.Worker, *billing.PricingCache, error) {
 	if pool == nil {
 		logger.Warn("DB not configured; billing disabled",
 			zap.String("hint", "set database.dsn in config.yaml to enable request_logs + pricing"))
 		return nil, nil, nil
 	}
 	pricing := billing.NewPricingCache(pool, logger)
+	pricing.SetMetrics(metrics)
 	if err := pricing.Reload(ctx); err != nil {
 		// Non-fatal: gateway runs but events record zero cost until DB recovers.
 		logger.Warn("initial pricing reload failed; events will record zero cost",
@@ -55,7 +57,7 @@ func buildBilling(ctx context.Context, cfg *config.Config, pool *storage.Pool, l
 	}
 	pricing.PeriodicReload(ctx, cfg.Billing.PricingReloadInterval)
 
-	w, err := billing.NewWorker(pool, pricing, billing.WorkerConfig{
+	w, err := billing.NewWorker(pool, pricing, metrics, billing.WorkerConfig{
 		BufferSize:   cfg.Billing.Worker.BufferSize,
 		Workers:      cfg.Billing.Worker.Workers,
 		FlushTimeout: cfg.Billing.Worker.FlushTimeout,
@@ -75,7 +77,7 @@ func buildBilling(ctx context.Context, cfg *config.Config, pool *storage.Pool, l
 // existing registry. The returned *router.Router is mandatory in
 // server.Deps; callers using an empty registry still get a working router
 // (it will just return ErrNoProviderForModel on every request).
-func buildRouter(cfg *config.Config, reg *registry.Registry, logger *zap.Logger) *router.Router {
+func buildRouter(cfg *config.Config, reg *registry.Registry, metrics *observability.Metrics, logger *zap.Logger) *router.Router {
 	policy := router.RetryPolicy{
 		MaxRetries:  cfg.Router.Retry.MaxRetries,
 		MaxTotal:    cfg.Router.Retry.MaxTotal,
@@ -89,7 +91,10 @@ func buildRouter(cfg *config.Config, reg *registry.Registry, logger *zap.Logger)
 		FailureRatio: cfg.Router.Breaker.FailureRatio,
 		MinRequests:  cfg.Router.Breaker.MinRequests,
 	}
-	return router.New(reg, policy, logger, router.WithBreakerSettings(breaker))
+	return router.New(reg, policy, logger,
+		router.WithBreakerSettings(breaker),
+		router.WithMetrics(metrics),
+	)
 }
 
 // loadPool builds the Postgres connection pool from cfg. Returns

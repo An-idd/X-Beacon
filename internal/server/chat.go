@@ -11,6 +11,7 @@ import (
 
 	"github.com/An-idd/x-beacon/internal/auth"
 	"github.com/An-idd/x-beacon/internal/billing"
+	"github.com/An-idd/x-beacon/internal/observability"
 	"github.com/An-idd/x-beacon/internal/provider"
 	"github.com/An-idd/x-beacon/internal/router"
 	"github.com/An-idd/x-beacon/internal/server/middleware"
@@ -44,7 +45,7 @@ const streamHeartbeatInterval = 15 * time.Second
 // tokenizer / billing may be nil; the handler degrades gracefully (no
 // token attribution / no billing rows) so dev-mode without DB still
 // boots and serves traffic.
-func chatCompletionsHandler(rtr *router.Router, tk *tokenizer.Selector, bill *billing.Worker, logger *zap.Logger) http.HandlerFunc {
+func chatCompletionsHandler(rtr *router.Router, tk *tokenizer.Selector, bill *billing.Worker, metrics *observability.Metrics, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reqID := middleware.RequestIDFrom(r.Context())
 		started := time.Now()
@@ -52,6 +53,7 @@ func chatCompletionsHandler(rtr *router.Router, tk *tokenizer.Selector, bill *bi
 		req, mapped, ok := readChatRequest(r)
 		if !ok {
 			writeError(w, mapped, reqID)
+			metrics.ObserveRequest("", "", mapped.Status, time.Since(started).Seconds())
 			return
 		}
 
@@ -66,11 +68,12 @@ func chatCompletionsHandler(rtr *router.Router, tk *tokenizer.Selector, bill *bi
 				Code:    "model_not_found",
 				Message: "Model " + req.Model + " is not configured on this gateway",
 			}, reqID)
+			metrics.ObserveRequest("", req.Model, http.StatusBadRequest, time.Since(started).Seconds())
 			return
 		}
 
 		if req.Stream {
-			handleChatStream(w, r, rtr, tk, bill, req, started, logger, reqID)
+			handleChatStream(w, r, rtr, tk, bill, metrics, req, started, logger, reqID)
 			return
 		}
 
@@ -83,6 +86,7 @@ func chatCompletionsHandler(rtr *router.Router, tk *tokenizer.Selector, bill *bi
 				zap.Int("status", m.Status),
 				zap.Error(err))
 			writeError(w, m, reqID)
+			metrics.ObserveRequest("", req.Model, m.Status, time.Since(started).Seconds())
 			emitBillingEvent(bill, billing.Event{
 				StartedAt: started,
 				RequestID: reqID,
@@ -107,6 +111,8 @@ func chatCompletionsHandler(rtr *router.Router, tk *tokenizer.Selector, bill *bi
 		// is missing (rare for non-stream), fall back to tokenizer
 		// estimates so the row is still useful for QPS / latency.
 		promptTok, completionTok := tokenCounts(tk, req, resp)
+		metrics.ObserveRequest(resp.Provider, req.Model, http.StatusOK, time.Since(started).Seconds())
+		metrics.AddTokens(resp.Provider, req.Model, promptTok, completionTok)
 		emitBillingEvent(bill, billing.Event{
 			StartedAt:        started,
 			RequestID:        reqID,

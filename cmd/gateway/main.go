@@ -69,6 +69,10 @@ func runWithCtx(ctx context.Context, args []string, stdout *os.File) error {
 	defer func() { _ = logger.Sync() }()
 
 	metricsReg := observability.NewMetricsRegistry()
+	metrics, err := observability.NewMetrics(metricsReg)
+	if err != nil {
+		return fmt.Errorf("init metrics: %w", err)
+	}
 
 	reg, err := loadRegistry(cfg.ProvidersFile, logger)
 	if err != nil {
@@ -131,14 +135,14 @@ func runWithCtx(ctx context.Context, args []string, stdout *os.File) error {
 		return fmt.Errorf("init rate limiter: %w", err)
 	}
 
-	rtr := buildRouter(cfg, reg, logger)
+	rtr := buildRouter(cfg, reg, metrics, logger)
 
 	tk, err := buildTokenizer(logger)
 	if err != nil {
 		return fmt.Errorf("init tokenizer: %w", err)
 	}
 
-	billingWorker, pricingCache, err := buildBilling(ctx, cfg, pool, logger)
+	billingWorker, pricingCache, err := buildBilling(ctx, cfg, pool, metrics, logger)
 	if err != nil {
 		return fmt.Errorf("init billing: %w", err)
 	}
@@ -153,6 +157,7 @@ func runWithCtx(ctx context.Context, args []string, stdout *os.File) error {
 		Tokenizer:         tk,
 		Billing:           billingWorker,
 		Pricing:           pricingCache,
+		Metrics:           metrics,
 		Authn:             authn,
 		RateLimiter:       rateLimiter,
 		MetricsReg:        metricsReg,

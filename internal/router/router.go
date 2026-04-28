@@ -16,8 +16,12 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 
+	"github.com/An-idd/x-beacon/internal/observability"
 	"github.com/An-idd/x-beacon/internal/provider"
 	"github.com/An-idd/x-beacon/internal/provider/registry"
 )
@@ -44,7 +48,13 @@ type Router struct {
 	resolver ModelResolver
 	policy   RetryPolicy
 	breakers *breakerPool
+	metrics  *observability.Metrics // nil-safe; helpers no-op on nil
 	logger   *zap.Logger
+
+	// breakerSettings is staged during option application; the actual
+	// breakerPool is built once at the end of New() so it observes the
+	// final metrics handle injected via WithMetrics.
+	breakerSettings BreakerSettings
 
 	// Injectable for deterministic tests. nil → real time.Now / time.After /
 	// math/rand/v2 uniform float. Tests that need to assert on backoff timing
@@ -78,7 +88,13 @@ func WithRandom(random func() float64) Option {
 // Mainly useful for tests that need fast-tripping breakers (low MinRequests,
 // short Timeout) — production callers should accept DefaultBreakerSettings.
 func WithBreakerSettings(s BreakerSettings) Option {
-	return func(r *Router) { r.breakers = newBreakerPool(s, r.logger) }
+	return func(r *Router) { r.breakerSettings = s }
+}
+
+// WithMetrics injects the gateway metrics bundle so the router can emit
+// failover and circuit-breaker observations. nil-safe.
+func WithMetrics(m *observability.Metrics) Option {
+	return func(r *Router) { r.metrics = m }
 }
 
 // New constructs a Router. policy is taken by value so callers can pass
@@ -86,17 +102,20 @@ func WithBreakerSettings(s BreakerSettings) Option {
 // a *registry.Registry from main; tests pass a stub.
 func New(resolver ModelResolver, policy RetryPolicy, logger *zap.Logger, opts ...Option) *Router {
 	r := &Router{
-		resolver: resolver,
-		policy:   policy,
-		logger:   logger,
-		now:      time.Now,
-		sleep:    defaultSleep,
-		random:   rand.Float64,
+		resolver:        resolver,
+		policy:          policy,
+		logger:          logger,
+		breakerSettings: DefaultBreakerSettings(),
+		now:             time.Now,
+		sleep:           defaultSleep,
+		random:          rand.Float64,
 	}
-	r.breakers = newBreakerPool(DefaultBreakerSettings(), logger)
 	for _, opt := range opts {
 		opt(r)
 	}
+	// breakerPool is built last so OnStateChange closes over the final
+	// metrics handle (WithMetrics may have arrived after WithBreakerSettings).
+	r.breakers = newBreakerPool(r.breakerSettings, logger, r.metrics)
 	return r
 }
 
@@ -159,6 +178,7 @@ func (r *Router) ChatCompletion(ctx context.Context, req *provider.ChatRequest) 
 				zap.String("from", p.Name()),
 				zap.String("to", chain[chainIdx+1].Name()),
 				zap.Error(err))
+			r.metrics.IncFailover(p.Name(), chain[chainIdx+1].Name())
 		}
 	}
 	return nil, lastErr
@@ -175,21 +195,41 @@ func (r *Router) ChatCompletion(ctx context.Context, req *provider.ChatRequest) 
 func (r *Router) tryProvider(ctx context.Context, p provider.Provider, req *provider.ChatRequest, start time.Time) (*provider.ChatResponse, error) {
 	var lastErr error
 	for attempt := 0; ; attempt++ {
+		attemptCtx, attemptSpan := observability.Tracer().Start(ctx, "router.attempt",
+			trace.WithAttributes(
+				attribute.String("provider", p.Name()),
+				attribute.String("model", req.Model),
+				attribute.Int("attempt", attempt),
+			),
+		)
 		done, gateErr := r.breakers.allow(p.Name())
 		if gateErr != nil {
+			attemptSpan.SetAttributes(attribute.String("breaker.state", "open"))
+			attemptSpan.SetStatus(codes.Error, gateErr.Error())
+			attemptSpan.End()
 			r.logger.Warn("circuit breaker rejected request",
 				zap.String("provider", p.Name()),
 				zap.String("model", req.Model),
 				zap.Error(gateErr))
 			return nil, gateErr
 		}
-		resp, callErr := p.ChatCompletion(ctx, req)
+		callCtx, callSpan := observability.Tracer().Start(attemptCtx, "provider.call",
+			trace.WithAttributes(attribute.String("provider", p.Name())),
+		)
+		resp, callErr := p.ChatCompletion(callCtx, req)
+		if callErr != nil {
+			callSpan.SetStatus(codes.Error, callErr.Error())
+		}
+		callSpan.End()
 		// Only retryable / unavailable errors count against the breaker.
 		// 4xx (request-shape, auth) shouldn't trip a healthy upstream.
 		done(breakerObservation(callErr))
 		if callErr == nil {
+			attemptSpan.End()
 			return resp, nil
 		}
+		attemptSpan.SetStatus(codes.Error, callErr.Error())
+		attemptSpan.End()
 		lastErr = callErr
 
 		if !provider.IsRetryable(callErr) {
@@ -273,6 +313,7 @@ func (r *Router) ChatCompletionStream(ctx context.Context, req *provider.ChatReq
 				zap.String("from", p.Name()),
 				zap.String("to", chain[chainIdx+1].Name()),
 				zap.Error(err))
+			r.metrics.IncFailover(p.Name(), chain[chainIdx+1].Name())
 		}
 	}
 	return nil, lastErr

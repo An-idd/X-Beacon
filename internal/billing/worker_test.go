@@ -12,7 +12,7 @@ import (
 )
 
 func TestNewWorker_RequiresPool(t *testing.T) {
-	_, err := NewWorker(nil, nil, DefaultWorkerConfig(), zap.NewNop())
+	_, err := NewWorker(nil, nil, nil, DefaultWorkerConfig(), zap.NewNop())
 	require.Error(t, err)
 }
 
@@ -36,7 +36,7 @@ func TestWorker_EnqueueAndPersist(t *testing.T) {
 	pricing := NewPricingCache(pool, zap.NewNop())
 	require.NoError(t, pricing.Reload(context.Background()))
 
-	w, err := NewWorker(pool, pricing, WorkerConfig{
+	w, err := NewWorker(pool, pricing, nil, WorkerConfig{
 		BufferSize: 100, Workers: 1, FlushTimeout: 2 * time.Second,
 	}, zap.NewNop())
 	require.NoError(t, err)
@@ -90,7 +90,7 @@ func TestWorker_EnqueueAndPersist(t *testing.T) {
 func TestWorker_EnqueueDropsOnFullBuffer(t *testing.T) {
 	pool := integrationPool(t)
 
-	w, err := NewWorker(pool, nil, WorkerConfig{
+	w, err := NewWorker(pool, nil, nil, WorkerConfig{
 		BufferSize: 2, Workers: 1, FlushTimeout: 2 * time.Second,
 	}, zap.NewNop())
 	require.NoError(t, err)
@@ -109,7 +109,7 @@ func TestWorker_StopFlushesPendingEvents(t *testing.T) {
 	pricing := NewPricingCache(pool, zap.NewNop())
 	require.NoError(t, pricing.Reload(context.Background()))
 
-	w, err := NewWorker(pool, pricing, WorkerConfig{
+	w, err := NewWorker(pool, pricing, nil, WorkerConfig{
 		BufferSize: 100, Workers: 1, FlushTimeout: 5 * time.Second,
 	}, zap.NewNop())
 	require.NoError(t, err)
@@ -131,7 +131,7 @@ func TestWorker_StopFlushesPendingEvents(t *testing.T) {
 
 func TestWorker_EnsurePartitionIdempotent(t *testing.T) {
 	pool := integrationPool(t)
-	w, err := NewWorker(pool, nil, DefaultWorkerConfig(), zap.NewNop())
+	w, err := NewWorker(pool, nil, nil, DefaultWorkerConfig(), zap.NewNop())
 	require.NoError(t, err)
 
 	ts := time.Now()
@@ -147,7 +147,7 @@ func TestWorker_NonBlockingUnderConcurrentEnqueue(t *testing.T) {
 	// Race detector + parallel writers verifies Enqueue is lock-free
 	// from the producer's POV (channel send is the only contention).
 	pool := integrationPool(t)
-	w, err := NewWorker(pool, nil, WorkerConfig{
+	w, err := NewWorker(pool, nil, nil, WorkerConfig{
 		BufferSize: 1000, Workers: 4, FlushTimeout: 5 * time.Second,
 	}, zap.NewNop())
 	require.NoError(t, err)

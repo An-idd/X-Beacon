@@ -8,6 +8,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/An-idd/x-beacon/internal/billing"
+	"github.com/An-idd/x-beacon/internal/observability"
 	"github.com/An-idd/x-beacon/internal/provider"
 	"github.com/An-idd/x-beacon/internal/router"
 	"github.com/An-idd/x-beacon/internal/server/sse"
@@ -35,6 +36,7 @@ func handleChatStream(
 	rtr *router.Router,
 	tk *tokenizer.Selector,
 	bill *billing.Worker,
+	metrics *observability.Metrics,
 	req *provider.ChatRequest,
 	started time.Time,
 	logger *zap.Logger,
@@ -54,6 +56,7 @@ func handleChatStream(
 			zap.Int("status", m.Status),
 			zap.Error(err))
 		writeError(w, m, reqID)
+		metrics.ObserveRequest("", req.Model, m.Status, time.Since(started).Seconds())
 		emitBillingEvent(bill, billing.Event{
 			StartedAt: started,
 			RequestID: reqID,
@@ -126,6 +129,10 @@ func handleChatStream(
 	}
 
 	prompt, completion := stats.tokenCounts(tk, req)
+	metrics.ObserveRequest(stats.provider, req.Model, finalStatus, time.Since(started).Seconds())
+	if finalStatus == http.StatusOK {
+		metrics.AddTokens(stats.provider, req.Model, prompt, completion)
+	}
 	emitBillingEvent(bill, billing.Event{
 		StartedAt:        started,
 		RequestID:        reqID,

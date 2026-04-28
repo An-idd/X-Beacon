@@ -7,9 +7,11 @@ import (
 	"strconv"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
 
 	"github.com/An-idd/x-beacon/internal/auth"
+	"github.com/An-idd/x-beacon/internal/observability"
 	"github.com/An-idd/x-beacon/internal/ratelimit"
 )
 
@@ -33,7 +35,7 @@ import (
 // through, error is logged at warn. Failing closed during a Redis
 // outage would amount to "Redis tickle = full outage", which is worse
 // than the temporary loss of enforcement.
-func RateLimit(multi *ratelimit.Multi, logger *zap.Logger) func(http.Handler) http.Handler {
+func RateLimit(multi *ratelimit.Multi, metrics *observability.Metrics, logger *zap.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		// nil/empty multi → no-op pass-through; cheaper than checking on
 		// every request.
@@ -42,7 +44,14 @@ func RateLimit(multi *ratelimit.Multi, logger *zap.Logger) func(http.Handler) ht
 		}
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			kctx := buildKeyContext(r)
-			d, err := multi.Check(r.Context(), kctx, 1)
+			rlCtx, span := observability.Tracer().Start(r.Context(), "ratelimit.check")
+			d, err := multi.Check(rlCtx, kctx, 1)
+			span.SetAttributes(
+				attribute.Bool("ratelimit.allowed", d.Allowed),
+				attribute.String("ratelimit.rule", d.Rule),
+				attribute.Int("ratelimit.remaining", d.Remaining),
+			)
+			span.End()
 			if err != nil {
 				logger.Warn("ratelimit backend error; failing open",
 					zap.String("req_id", RequestIDFrom(r.Context())),
@@ -59,6 +68,7 @@ func RateLimit(multi *ratelimit.Multi, logger *zap.Logger) func(http.Handler) ht
 					zap.String("rule", d.Rule),
 					zap.String("path", r.URL.Path),
 					zap.Int("limit", d.Limit))
+				metrics.IncRatelimitReject(d.Rule)
 				writeRateLimitDenied(w, d, RequestIDFrom(r.Context()))
 				return
 			}

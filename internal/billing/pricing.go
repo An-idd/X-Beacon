@@ -23,6 +23,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/An-idd/x-beacon/internal/observability"
 	"github.com/An-idd/x-beacon/internal/storage"
 )
 
@@ -41,8 +42,9 @@ type Rate struct {
 // atomic.Pointer to a snapshot map so reads are lock-free; writes
 // (Reload, Set, Delete) atomically swap a fresh snapshot.
 type PricingCache struct {
-	pool   *storage.Pool
-	logger *zap.Logger
+	pool    *storage.Pool
+	metrics *observability.Metrics // nil-safe
+	logger  *zap.Logger
 
 	// snapshot is the read view. Updaters CAS-replace it; readers Load it.
 	snapshot atomic.Pointer[map[string]Rate]
@@ -50,6 +52,19 @@ type PricingCache struct {
 	// reloadMu serializes Reload/Set/Delete so concurrent admins don't
 	// produce write-write torn snapshots. Reads are unaffected.
 	reloadMu sync.Mutex
+}
+
+// SetMetrics attaches the gateway metrics bundle so cache writes
+// publish a `gateway_pricing_cache_size` gauge update. Safe to call
+// after construction; main wires it during startup once metrics are
+// built. nil clears the binding (used by tests).
+func (c *PricingCache) SetMetrics(m *observability.Metrics) {
+	c.metrics = m
+	// Emit current size so the gauge isn't stuck at 0 between startup
+	// and the next reload tick.
+	if snap := c.snapshot.Load(); snap != nil {
+		c.metrics.SetPricingCacheSize(len(*snap))
+	}
 }
 
 // NewPricingCache builds an empty cache pointing at pool. Callers must
@@ -119,6 +134,7 @@ func (c *PricingCache) Reload(ctx context.Context) error {
 	}
 
 	c.snapshot.Store(&next)
+	c.metrics.SetPricingCacheSize(len(next))
 	if c.logger != nil {
 		c.logger.Info("pricing cache reloaded", zap.Int("models", len(next)))
 	}
@@ -197,6 +213,7 @@ func (c *PricingCache) replaceOne(r Rate) {
 	}
 	next[r.Model] = r
 	c.snapshot.Store(&next)
+	c.metrics.SetPricingCacheSize(len(next))
 }
 
 func (c *PricingCache) removeOne(model string) {
@@ -212,6 +229,7 @@ func (c *PricingCache) removeOne(model string) {
 		next[k] = v
 	}
 	c.snapshot.Store(&next)
+	c.metrics.SetPricingCacheSize(len(next))
 }
 
 // Cost computes the total cost (in micro-units) of a single request

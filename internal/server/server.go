@@ -16,6 +16,7 @@ import (
 
 	"github.com/An-idd/x-beacon/internal/auth"
 	"github.com/An-idd/x-beacon/internal/billing"
+	"github.com/An-idd/x-beacon/internal/observability"
 	"github.com/An-idd/x-beacon/internal/provider/registry"
 	"github.com/An-idd/x-beacon/internal/ratelimit"
 	"github.com/An-idd/x-beacon/internal/router"
@@ -62,6 +63,11 @@ type Deps struct {
 	// /admin/pricing routes are mounted and protected by the
 	// admin:pricing scope. Optional in dev mode.
 	Pricing *billing.PricingCache
+
+	// Metrics is the gateway-specific Prometheus metric bundle (Week
+	// 8). Optional; nil-safe helpers everywhere so dev-mode without a
+	// metrics scrape target still serves traffic.
+	Metrics *observability.Metrics
 
 	// ReadinessCheckers feed /readyz. Order is preserved in the JSON body
 	// for stable parsing. nil/empty makes /readyz a trivial 200.
@@ -139,12 +145,12 @@ func New(deps Deps) (*Server, error) {
 		}
 		// RateLimit runs AFTER Auth so per-key rules can pluck Principal.
 		// nil/empty Multi short-circuits (no-op middleware).
-		v1.Use(middleware.RateLimit(deps.RateLimiter, deps.Logger))
+		v1.Use(middleware.RateLimit(deps.RateLimiter, deps.Metrics, deps.Logger))
 		// OpenAI-compatible model catalog. Handler tolerates an empty registry
 		// (returns {"object":"list","data":[]}) so the gateway boots even when
 		// providers.yaml is absent.
 		v1.Get("/models", modelsHandler(deps.Registry))
-		v1.Post("/chat/completions", chatCompletionsHandler(deps.Router, deps.Tokenizer, deps.Billing, deps.Logger))
+		v1.Post("/chat/completions", chatCompletionsHandler(deps.Router, deps.Tokenizer, deps.Billing, deps.Metrics, deps.Logger))
 	})
 
 	// /admin/* requires both Auth (so we have a Principal) and the
