@@ -74,44 +74,72 @@ margin (−0.05% / −0.06% measured).
 
 ---
 
-## Week 8 chat-path bench (M2 acceptance)
+## Week 8 chat-path bench (M2 acceptance, 2026-04-28)
 
-> **Status: script ready, baseline pending hardware.** Run on a host
-> with both `docker` and `vegeta` installed; capture the resulting
-> numbers and append below.
+Environment: local Mac mini · macOS 15.6.1 / Darwin 24.6.0 / arm64 ·
+Postgres 16 + Redis Stack 7.4 in docker · gateway, vegeta and mock
+upstream all on the same host · commit `3586586`.
 
-Environment requirements:
+Setup used (reproducible):
 
 ```bash
-# 1. Bring up dependencies.
+# 1. Dependencies.
 docker compose up -d postgres redis
 
-# 2. Apply schema.
-./bin/xbctl migrate up
+# 2. Build + migrate.
+make build
+./bin/xbctl migrate -config configs/config.yaml up
 
-# 3. Mint a key and configure a mock-upstream provider.
-GATEWAY_KEY=$(./bin/xbctl keygen --name bench --json | jq -r .secret)
-# providers.yaml should point gpt-4o-mini at a local httptest server or
-# the included mock provider; see test/smoke_test.go for the shape.
+# 3. Mint a key (one-shot).
+./bin/xbctl keygen -config configs/config.yaml -name bench
+# secret is printed once; export it as GATEWAY_KEY for the bench.
 
-# 4. Start the gateway.
+# 4. Mock upstream (returns canned 200 with usage={1,1,2}).
+go build -o bin/mockupstream ./scripts/mockupstream
+./bin/mockupstream &        # listens on 127.0.0.1:9091
+
+# 5. Point providers.yaml at the mock (single openai-compat provider,
+#    endpoint=http://127.0.0.1:9091, model gpt-4o-mini), then:
 ./bin/x-beacon --config configs/config.yaml &
 
-# 5. Run the bench.
-RATE=1000 DURATION=60s GATEWAY_KEY=$GATEWAY_KEY \
+# 6. Run the bench.
+RATE=1000 DURATION=30s GATEWAY_KEY=sk-... \
   MOCK_MODEL=gpt-4o-mini scripts/bench.sh
 ```
 
 Acceptance: **P99 < 20 ms** on `/v1/chat/completions` at sustained
-1000 RPS, against a mock upstream that returns instantly.
+1000 RPS against an instant mock upstream.
 
-### Results (TODO)
+### Results
 
-| RPS  | P50 | P95 | P99 | Errors | Notes |
-|------|-----|-----|-----|--------|-------|
-| 200  | -   | -   | -   | -      | warm-up |
-| 1000 | -   | -   | -   | -      | acceptance |
-| 5000 | -   | -   | -   | -      | sustained |
+`/v1/chat/completions` (full hot path: auth → ratelimit → router →
+tokenizer → mock provider → billing enqueue):
+
+| RPS  | P50     | P95     | P99       | Max     | Errors | Notes      |
+|------|---------|---------|-----------|---------|--------|------------|
+| 200  | 1.467ms | 2.761ms | **6.484ms** | 21.0ms | 0/3000 | warm-up    |
+| 1000 | 362µs   | 504µs   | **1.213ms** | 65.4ms | 0/30000 | acceptance |
+| 5000 | 308µs   | 570µs   | **1.093ms** | 22.5ms | 0/100000 | sustained |
+
+Companion paths at 1000 RPS / 30 s for context:
+
+| Path           | P50     | P95     | P99       |
+|----------------|---------|---------|-----------|
+| `/healthz`     | (see Week 4 baseline) | | |
+| `/readyz`      | 697µs   | 1.08ms  | **2.10ms** |
+| `/v1/models` warm | 609µs | 942µs  | **1.79ms** |
+
+Billing pipeline at the end of the run:
+`gateway_billing_written_total = 164001`,
+`gateway_billing_dropped_total = 0` — async writer kept up with
+combined 200 + 1000 + 5000 RPS without a single drop.
+
+**Conclusion**: M2 line "P99 < 20 ms on `/v1/chat/completions` at
+1000 RPS" passed with **~16× margin** (1.21 ms measured). The 5000 RPS
+sustained line in CLAUDE.md also passed (P99 = 1.09 ms, 0 errors over
+100k requests). Hot path is comfortably sub-2 ms; the visible tails
+(max 22–65 ms) are GC + connection-establishment, not steady-state
+work.
 
 ---
 

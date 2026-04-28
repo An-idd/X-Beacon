@@ -71,10 +71,15 @@ MOCK_MODEL="${MOCK_MODEL:-gpt-4o-mini}"
 echo "## /v1/chat/completions (full hot path, mock upstream, model=$MOCK_MODEL)"
 CHAT_BODY="${CHAT_BODY:-$(printf '{"model":"%s","messages":[{"role":"user","content":"ping"}]}' "$MOCK_MODEL")}"
 CHAT_TARGETS=$(mktemp)
-trap 'rm -f "$TARGETS" "$CHAT_TARGETS"' EXIT
+CHAT_BODY_FILE=$(mktemp)
+trap 'rm -f "$TARGETS" "$CHAT_TARGETS" "$CHAT_BODY_FILE"' EXIT
+printf '%s' "$CHAT_BODY" > "$CHAT_BODY_FILE"
+# Use @<file> body directive so vegeta reads the JSON body from disk
+# (the inline-body trick via @- only works when piping the targets file
+# through vegeta on stdin, which we aren't here).
 {
-  printf 'POST %s/v1/chat/completions\nAuthorization: Bearer %s\nContent-Type: application/json\n@-\n%s\n' \
-    "$TARGET_HOST" "$GATEWAY_KEY" "$CHAT_BODY"
+  printf 'POST %s/v1/chat/completions\nAuthorization: Bearer %s\nContent-Type: application/json\n@%s\n' \
+    "$TARGET_HOST" "$GATEWAY_KEY" "$CHAT_BODY_FILE"
 } > "$CHAT_TARGETS"
 
 # Warm-up to populate caches (auth / pricing) so the recorded run is
