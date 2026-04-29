@@ -21,6 +21,7 @@ import (
 	"github.com/An-idd/x-beacon/internal/observability"
 	"github.com/An-idd/x-beacon/internal/provider/registry"
 	"github.com/An-idd/x-beacon/internal/ratelimit"
+	"github.com/An-idd/x-beacon/internal/route"
 	"github.com/An-idd/x-beacon/internal/router"
 	"github.com/An-idd/x-beacon/internal/server/middleware"
 	"github.com/An-idd/x-beacon/pkg/tokenizer"
@@ -88,6 +89,13 @@ type Deps struct {
 	// chat handler queries Semantic on exact-miss and writes to it
 	// alongside Cache on successful upstream responses.
 	Semantic cache.Semantic
+
+	// Classifier is the smart-routing layer (Week 11). Optional —
+	// when nil, requests pass through with their requested model
+	// unchanged. When non-nil, the chat handler runs Classify before
+	// cache + router, and mutates req.Model on a non-empty Decision
+	// (Choice A: cache keys + billing reflect the routed model).
+	Classifier route.Classifier
 
 	// ReadinessCheckers feed /readyz. Order is preserved in the JSON body
 	// for stable parsing. nil/empty makes /readyz a trivial 200.
@@ -170,7 +178,7 @@ func New(deps Deps) (*Server, error) {
 		// (returns {"object":"list","data":[]}) so the gateway boots even when
 		// providers.yaml is absent.
 		v1.Get("/models", modelsHandler(deps.Registry))
-		v1.Post("/chat/completions", chatCompletionsHandler(deps.Router, deps.Tokenizer, deps.Billing, deps.Metrics, deps.Cache, deps.CacheTTL, deps.Semantic, deps.Logger))
+		v1.Post("/chat/completions", chatCompletionsHandler(deps.Router, deps.Tokenizer, deps.Billing, deps.Metrics, deps.Cache, deps.CacheTTL, deps.Semantic, deps.Classifier, deps.Logger))
 	})
 
 	// /admin/* requires both Auth (so we have a Principal) and the

@@ -24,8 +24,38 @@ type Config struct {
 	Auth          AuthConfig          `mapstructure:"auth"`
 	RateLimits    []RateLimitRule     `mapstructure:"rate_limits"`
 	Router        RouterConfig        `mapstructure:"router"`
+	Routing       RoutingConfig       `mapstructure:"routing"`
 	Billing       BillingConfig       `mapstructure:"billing"`
 	Cache         CacheConfig         `mapstructure:"cache"`
+}
+
+// RoutingConfig is Week 11's smart-routing layer. The chat handler
+// runs Classify before cache + router, and the rules listed here are
+// evaluated in order — first match wins (no cascading). Disable by
+// setting enabled=false; the chat handler then skips classification
+// entirely and requests pass through with their declared model.
+type RoutingConfig struct {
+	Enabled bool          `mapstructure:"enabled"`
+	Rules   []RoutingRule `mapstructure:"rules"`
+}
+
+// RoutingRule mirrors internal/route.Rule shape so cmd/gateway can
+// translate without per-field mapping. Keep field names aligned with
+// the YAML the operator writes.
+type RoutingRule struct {
+	Name    string           `mapstructure:"name"`
+	RouteTo string           `mapstructure:"route_to"`
+	When    RoutingCondition `mapstructure:"when"`
+}
+
+// RoutingCondition mirrors route.Condition. Multiple fields AND
+// together; keyword lists OR within themselves; zero values mean
+// "don't check".
+type RoutingCondition struct {
+	MaxTokens    int      `mapstructure:"max_tokens"`
+	MinTokens    int      `mapstructure:"min_tokens"`
+	KeywordsAny  []string `mapstructure:"keywords_any"`
+	KeywordsNone []string `mapstructure:"keywords_none"`
 }
 
 // BillingConfig configures the async request_logs writer + pricing

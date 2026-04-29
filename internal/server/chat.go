@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
 
 	"github.com/An-idd/x-beacon/internal/auth"
@@ -14,6 +15,7 @@ import (
 	"github.com/An-idd/x-beacon/internal/cache"
 	"github.com/An-idd/x-beacon/internal/observability"
 	"github.com/An-idd/x-beacon/internal/provider"
+	"github.com/An-idd/x-beacon/internal/route"
 	"github.com/An-idd/x-beacon/internal/router"
 	"github.com/An-idd/x-beacon/internal/server/middleware"
 	"github.com/An-idd/x-beacon/internal/server/sse"
@@ -47,7 +49,7 @@ const streamHeartbeatInterval = 15 * time.Second
 // tokenizer / billing may be nil; the handler degrades gracefully (no
 // token attribution / no billing rows) so dev-mode without DB still
 // boots and serves traffic.
-func chatCompletionsHandler(rtr *router.Router, tk *tokenizer.Selector, bill *billing.Worker, metrics *observability.Metrics, exactCache cache.Exact, cacheTTL time.Duration, semanticCache cache.Semantic, logger *zap.Logger) http.HandlerFunc {
+func chatCompletionsHandler(rtr *router.Router, tk *tokenizer.Selector, bill *billing.Worker, metrics *observability.Metrics, exactCache cache.Exact, cacheTTL time.Duration, semanticCache cache.Semantic, classifier route.Classifier, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reqID := middleware.RequestIDFrom(r.Context())
 		started := time.Now()
@@ -57,6 +59,43 @@ func chatCompletionsHandler(rtr *router.Router, tk *tokenizer.Selector, bill *bi
 			writeError(w, mapped, reqID)
 			metrics.ObserveRequest("", "", mapped.Status, time.Since(started).Seconds())
 			return
+		}
+
+		// Smart routing (Week 11). Choice A: mutate req.Model in place
+		// so cache.Key + ResolveModel + billing all see the routed
+		// model. The original model is intentionally not preserved on
+		// the request — clients that want strict explicit-model
+		// behavior must opt out via the smart_route:disable scope
+		// (Week 11.5), which short-circuits this block.
+		var routedFrom string
+		if classifier != nil {
+			classifyCtx, classifySpan := observability.Tracer().Start(r.Context(), "route.classify")
+			principal := auth.PrincipalFrom(classifyCtx)
+			switch {
+			case principal.HasScope("smart_route", "disable"):
+				// A/B opt-out: this API key is on the control arm.
+				// Surface the opt-out as a header so debug sessions
+				// can confirm the route layer was bypassed.
+				w.Header().Set("X-X-Beacon-Route-Rule", "skip:scope")
+				metrics.IncRouterBypass("scope")
+				classifySpan.SetAttributes(attribute.String("route.skip_reason", "scope"))
+			default:
+				decision := classifier.Classify(req)
+				if !decision.Empty() {
+					routedFrom = req.Model
+					req.Model = decision.Model
+					w.Header().Set("X-X-Beacon-Route-Rule", decision.Rule)
+					w.Header().Set("X-X-Beacon-Route-From", routedFrom)
+					w.Header().Set("X-X-Beacon-Route-To", decision.Model)
+					metrics.IncRouterDecision(routedFrom, decision.Model, decision.Rule)
+					classifySpan.SetAttributes(
+						attribute.String("route.from", routedFrom),
+						attribute.String("route.to", decision.Model),
+						attribute.String("route.rule", decision.Rule),
+					)
+				}
+			}
+			classifySpan.End()
 		}
 
 		// Pre-flight: surface 400 model_not_found before invoking the

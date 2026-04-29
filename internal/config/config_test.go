@@ -46,6 +46,45 @@ log:
 	assert.Equal(t, 30*time.Second, cfg.Server.ShutdownTimeout) // default
 }
 
+func TestLoad_RoutingRulesParsed(t *testing.T) {
+	yaml := `
+routing:
+  enabled: true
+  rules:
+    - name: translate
+      route_to: gpt-4o-mini
+      when:
+        max_tokens: 200
+        keywords_any: [translate, 翻译]
+    - name: debug
+      route_to: claude-3-5-sonnet
+      when:
+        keywords_none: [hello]
+`
+	path := writeTempYAML(t, yaml)
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.True(t, cfg.Routing.Enabled)
+	require.Len(t, cfg.Routing.Rules, 2)
+
+	r1 := cfg.Routing.Rules[0]
+	assert.Equal(t, "translate", r1.Name)
+	assert.Equal(t, "gpt-4o-mini", r1.RouteTo)
+	assert.Equal(t, 200, r1.When.MaxTokens)
+	assert.Equal(t, []string{"translate", "翻译"}, r1.When.KeywordsAny)
+
+	r2 := cfg.Routing.Rules[1]
+	assert.Equal(t, "claude-3-5-sonnet", r2.RouteTo)
+	assert.Equal(t, []string{"hello"}, r2.When.KeywordsNone)
+}
+
+func TestLoad_RoutingDefaultsDisabled(t *testing.T) {
+	cfg, err := Load("")
+	require.NoError(t, err)
+	assert.False(t, cfg.Routing.Enabled, "routing must default to off when absent from config")
+	assert.Empty(t, cfg.Routing.Rules)
+}
+
 func TestLoad_EnvOverride(t *testing.T) {
 	t.Setenv("XBEACON_SERVER_ADDR", ":7777")
 	cfg, err := Load("")

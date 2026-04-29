@@ -73,6 +73,18 @@ type Metrics struct {
 	// slow" diagnosable when paired with cacheLookupDuration.
 	semanticLookupDuration *prometheus.HistogramVec
 
+	// routerDecisionTotal counts the requests that were actually
+	// rerouted by smart routing (Week 11). NOT a per-request counter —
+	// the "no rule matched" path is intentionally not recorded here.
+	// Pair with gateway_requests_total to compute reroute share.
+	routerDecisionTotal *prometheus.CounterVec
+
+	// routerBypassTotal counts requests where the classifier was
+	// SKIPPED for an explicit reason (e.g. smart_route:disable scope).
+	// Separate from decision_total so an A/B opt-out alert can target
+	// just this metric: a sudden drop to 0 means the scope check broke.
+	routerBypassTotal *prometheus.CounterVec
+
 	// ratelimitRejectedTotal counts 429s by rule name (the user's
 	// configured `name` in rate_limits[]).
 	ratelimitRejectedTotal *prometheus.CounterVec
@@ -190,6 +202,16 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 			Buckets: semanticLookupBuckets,
 		}, []string{"result"}),
 
+		routerDecisionTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "gateway_router_decision_total",
+			Help: "Smart-routing decisions that actually rewrote req.Model. Pair with gateway_requests_total for rerouting share.",
+		}, []string{"from", "to", "rule"}),
+
+		routerBypassTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "gateway_router_bypass_total",
+			Help: "Smart-routing skipped explicitly. reason=scope when a smart_route:disable principal opted out.",
+		}, []string{"reason"}),
+
 		ratelimitRejectedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "gateway_ratelimit_rejected_total",
 			Help: "429s issued, labeled by the rate-limit rule that triggered.",
@@ -225,7 +247,8 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		m.requestsTotal, m.requestDuration, m.tokensTotal,
 		m.costMicroTotal, m.cacheHitsTotal, m.cacheWritesTotal,
 		m.cacheLookupDuration, m.semanticSimilarity, m.semanticThreshold,
-		m.semanticLookupDuration, m.ratelimitRejectedTotal,
+		m.semanticLookupDuration, m.routerDecisionTotal, m.routerBypassTotal,
+		m.ratelimitRejectedTotal,
 		m.routerFailoverTotal, m.breakerState,
 		m.billingDroppedTotal, m.billingWrittenTotal, m.pricingCacheSize,
 	}
@@ -331,6 +354,25 @@ func (m *Metrics) ObserveSemanticLookup(result string, durationSec float64) {
 		return
 	}
 	m.semanticLookupDuration.WithLabelValues(result).Observe(durationSec)
+}
+
+// IncRouterDecision counts one actual reroute. Caller passes the
+// pre-route model id, the post-route model id, and the rule name
+// that fired.
+func (m *Metrics) IncRouterDecision(from, to, rule string) {
+	if m == nil {
+		return
+	}
+	m.routerDecisionTotal.WithLabelValues(from, to, rule).Inc()
+}
+
+// IncRouterBypass counts one classifier-skipped request. reason should
+// be a stable token: currently only "scope".
+func (m *Metrics) IncRouterBypass(reason string) {
+	if m == nil {
+		return
+	}
+	m.routerBypassTotal.WithLabelValues(reason).Inc()
 }
 
 // IncRatelimitReject bumps the rate-limit rejection counter for rule.

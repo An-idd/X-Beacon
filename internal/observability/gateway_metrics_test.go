@@ -32,6 +32,8 @@ func TestNewMetrics_RegistersAllCollectors(t *testing.T) {
 	m.ObserveSemanticSimilarity(0.97)
 	m.SetSemanticThreshold(0.95)
 	m.ObserveSemanticLookup("hit", 0.08)
+	m.IncRouterDecision("primary", "cheap", "translate")
+	m.IncRouterBypass("scope")
 	m.IncRatelimitReject("global-rps")
 	m.IncFailover("a", "b")
 	m.SetBreakerState("p", 1)
@@ -57,6 +59,8 @@ func TestNewMetrics_RegistersAllCollectors(t *testing.T) {
 		"gateway_cache_semantic_similarity",
 		"gateway_cache_semantic_threshold",
 		"gateway_cache_semantic_lookup_duration_seconds",
+		"gateway_router_decision_total",
+		"gateway_router_bypass_total",
 		"gateway_ratelimit_rejected_total",
 		"gateway_router_failover_total",
 		"gateway_breaker_state",
@@ -194,6 +198,23 @@ func TestSemanticMetrics_HelpersAreNilSafeAndCount(t *testing.T) {
 	m.ObserveSemanticLookup("error", 1.5)
 	assert.Equal(t, 3, testutil.CollectAndCount(m.semanticLookupDuration),
 		"three distinct result labels should produce three series")
+}
+
+func TestRouterMetrics_HelpersAreNilSafeAndCount(t *testing.T) {
+	var nilM *Metrics
+	nilM.IncRouterDecision("a", "b", "r")
+	nilM.IncRouterBypass("scope")
+
+	m, _ := newTestMetrics(t)
+	m.IncRouterDecision("primary", "cheap", "translate")
+	m.IncRouterDecision("primary", "cheap", "translate")
+	m.IncRouterDecision("primary", "expensive", "long")
+	assert.Equal(t, float64(2), testutil.ToFloat64(m.routerDecisionTotal.WithLabelValues("primary", "cheap", "translate")))
+	assert.Equal(t, float64(1), testutil.ToFloat64(m.routerDecisionTotal.WithLabelValues("primary", "expensive", "long")))
+
+	m.IncRouterBypass("scope")
+	m.IncRouterBypass("scope")
+	assert.Equal(t, float64(2), testutil.ToFloat64(m.routerBypassTotal.WithLabelValues("scope")))
 }
 
 func TestNewMetrics_DuplicateRegistrationFails(t *testing.T) {

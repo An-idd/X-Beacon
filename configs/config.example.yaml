@@ -124,6 +124,41 @@ billing:
   # multi-instance deployments.
   pricing_reload_interval: 30m
 
+# Smart routing (Week 11). The chat handler classifies each request
+# top-to-bottom against `rules`; the first matching rule's `route_to`
+# replaces req.Model BEFORE cache lookup + upstream selection. An
+# unmatched request keeps its declared model.
+#
+# Choice A semantics: cache keys, billing rows, and the response
+# `model` field all reflect the routed model — i.e. the gateway is
+# honest about which upstream actually served the answer. Clients
+# wanting strict explicit-model behavior can opt out per API key via
+# the `smart_route:disable` scope (see xbctl keygen --scope).
+#
+# Conditions inside `when` are AND-joined; `keywords_any` is
+# substring + case-insensitive against concatenated user-role message
+# content (system / assistant / tool messages are ignored to defend
+# against routing-keyword injection in system prompts). Token counts
+# are computed via the Week 7 tokenizer; rules using max_tokens /
+# min_tokens implicitly require a tokenizer to be configured.
+routing:
+  enabled: false
+  rules: []
+  # rules:
+  #   - name: short-translate
+  #     route_to: gpt-4o-mini
+  #     when:
+  #       max_tokens: 200
+  #       keywords_any: [translate, 翻译]
+  #   - name: code-debug
+  #     route_to: claude-3-5-sonnet
+  #     when:
+  #       keywords_any: [debug, 调试, stack trace]
+  #   - name: long-context
+  #     route_to: gpt-4o
+  #     when:
+  #       min_tokens: 4000
+
 cache:
   exact:
     enabled: true

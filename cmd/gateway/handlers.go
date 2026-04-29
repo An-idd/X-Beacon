@@ -17,6 +17,7 @@ import (
 	"github.com/An-idd/x-beacon/internal/observability"
 	"github.com/An-idd/x-beacon/internal/provider/registry"
 	"github.com/An-idd/x-beacon/internal/ratelimit"
+	"github.com/An-idd/x-beacon/internal/route"
 	"github.com/An-idd/x-beacon/internal/router"
 	"github.com/An-idd/x-beacon/internal/server"
 	"github.com/An-idd/x-beacon/internal/storage"
@@ -325,6 +326,50 @@ func buildSemanticCache(cfg *config.Config, rdb *redis.Client, metrics *observab
 		zap.Int("query_lru_capacity", lruCap),
 	)
 	return sel
+}
+
+// buildClassifier constructs the Week 11 smart-routing classifier
+// from RoutingConfig. Optional in two layered ways:
+//
+//  1. routing.enabled = false (or block absent) → no classifier
+//  2. routing.rules empty → no classifier (no point running the path
+//     when nothing can match; cleaner than registering a no-op layer)
+//
+// Returns nil on misconfiguration with a warn log so dev mode keeps
+// booting; production deployments should set strict_routing if/when
+// we add a fail-fast mode (currently always permissive).
+func buildClassifier(cfg *config.Config, tk *tokenizer.Selector, logger *zap.Logger) route.Classifier {
+	rc := cfg.Routing
+	if !rc.Enabled {
+		logger.Info("smart routing disabled by config")
+		return nil
+	}
+	if len(rc.Rules) == 0 {
+		logger.Warn("smart routing enabled but no rules configured; classifier disabled",
+			zap.String("hint", "add entries under routing.rules in config.yaml"))
+		return nil
+	}
+	rules := make([]route.Rule, 0, len(rc.Rules))
+	for _, r := range rc.Rules {
+		rules = append(rules, route.Rule{
+			Name:    r.Name,
+			RouteTo: r.RouteTo,
+			When: route.Condition{
+				MaxTokens:    r.When.MaxTokens,
+				MinTokens:    r.When.MinTokens,
+				KeywordsAny:  append([]string(nil), r.When.KeywordsAny...),
+				KeywordsNone: append([]string(nil), r.When.KeywordsNone...),
+			},
+		})
+	}
+	classifier, err := route.NewRuleClassifier(rules, tk)
+	if err != nil {
+		logger.Warn("smart routing: classifier construction failed; classifier disabled",
+			zap.Error(err))
+		return nil
+	}
+	logger.Info("smart routing ready", zap.Int("rules", len(rules)))
+	return classifier
 }
 
 // loadAuth wires the production Authenticator. From Step 4.3, that means

@@ -152,6 +152,7 @@ func runWithCtx(ctx context.Context, args []string, stdout *os.File) error {
 
 	exactCache, cacheTTL := buildExactCache(cfg, rdb, logger)
 	semanticCache := buildSemanticCache(cfg, rdb, metrics, logger)
+	classifier := buildClassifier(cfg, tk, logger)
 
 	srv, err := server.New(server.Deps{
 		Logger:            logger,
@@ -166,6 +167,7 @@ func runWithCtx(ctx context.Context, args []string, stdout *os.File) error {
 		Cache:             exactCache,
 		CacheTTL:          cacheTTL,
 		Semantic:          semanticCache,
+		Classifier:        classifier,
 		MetricsReg:        metricsReg,
 		MetricsEnabled:    cfg.Observability.Metrics.Enabled,
 		MetricsPath:       cfg.Observability.Metrics.Path,
