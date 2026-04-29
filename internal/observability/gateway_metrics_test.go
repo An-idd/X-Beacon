@@ -27,6 +27,8 @@ func TestNewMetrics_RegistersAllCollectors(t *testing.T) {
 	m.AddTokens("p", "m", 10, 5)
 	m.AddCost("p", "m", "k", 100)
 	m.IncCacheHit("exact")
+	m.IncCacheWrite("exact")
+	m.ObserveCacheLookup("hit", 0.0003)
 	m.IncRatelimitReject("global-rps")
 	m.IncFailover("a", "b")
 	m.SetBreakerState("p", 1)
@@ -47,6 +49,8 @@ func TestNewMetrics_RegistersAllCollectors(t *testing.T) {
 		"gateway_tokens_total",
 		"gateway_cost_micro_total",
 		"gateway_cache_hits_total",
+		"gateway_cache_writes_total",
+		"gateway_cache_lookup_duration_seconds",
 		"gateway_ratelimit_rejected_total",
 		"gateway_router_failover_total",
 		"gateway_breaker_state",
@@ -132,6 +136,27 @@ func TestNilMetrics_AllHelpersNoOp(t *testing.T) {
 		m.IncBillingWritten()
 		m.SetPricingCacheSize(1)
 	})
+}
+
+func TestCacheMetrics_HelpersAreNilSafeAndCount(t *testing.T) {
+	var nilM *Metrics
+	// Nil receiver must be safe (dev mode without a registered Metrics).
+	nilM.IncCacheHit("exact")
+	nilM.IncCacheWrite("exact")
+	nilM.ObserveCacheLookup("hit", 0.001)
+
+	m, _ := newTestMetrics(t)
+	m.IncCacheWrite("exact")
+	m.IncCacheWrite("exact")
+	m.IncCacheWrite("semantic")
+	assert.Equal(t, float64(2), testutil.ToFloat64(m.cacheWritesTotal.WithLabelValues("exact")))
+	assert.Equal(t, float64(1), testutil.ToFloat64(m.cacheWritesTotal.WithLabelValues("semantic")))
+
+	m.ObserveCacheLookup("hit", 0.0002)
+	m.ObserveCacheLookup("miss", 0.0010)
+	m.ObserveCacheLookup("error", 0.050)
+	// Three distinct label sets, each with one observation.
+	assert.Equal(t, 3, testutil.CollectAndCount(m.cacheLookupDuration))
 }
 
 func TestNewMetrics_DuplicateRegistrationFails(t *testing.T) {

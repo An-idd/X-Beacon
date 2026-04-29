@@ -11,6 +11,7 @@ import (
 
 	"github.com/An-idd/x-beacon/internal/auth"
 	"github.com/An-idd/x-beacon/internal/billing"
+	"github.com/An-idd/x-beacon/internal/cache"
 	"github.com/An-idd/x-beacon/internal/observability"
 	"github.com/An-idd/x-beacon/internal/provider"
 	"github.com/An-idd/x-beacon/internal/router"
@@ -45,7 +46,7 @@ const streamHeartbeatInterval = 15 * time.Second
 // tokenizer / billing may be nil; the handler degrades gracefully (no
 // token attribution / no billing rows) so dev-mode without DB still
 // boots and serves traffic.
-func chatCompletionsHandler(rtr *router.Router, tk *tokenizer.Selector, bill *billing.Worker, metrics *observability.Metrics, logger *zap.Logger) http.HandlerFunc {
+func chatCompletionsHandler(rtr *router.Router, tk *tokenizer.Selector, bill *billing.Worker, metrics *observability.Metrics, exactCache cache.Exact, cacheTTL time.Duration, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reqID := middleware.RequestIDFrom(r.Context())
 		started := time.Now()
@@ -73,8 +74,61 @@ func chatCompletionsHandler(rtr *router.Router, tk *tokenizer.Selector, bill *bi
 		}
 
 		if req.Stream {
+			// Decision 4 (Week 9): streaming bypasses the cache entirely
+			// until Week 10 implements synthetic-stream replay + write
+			// aggregation. Header signals the bypass for client-side
+			// debugging.
+			if exactCache != nil {
+				w.Header().Set("X-X-Beacon-Cache", "bypass")
+			}
 			handleChatStream(w, r, rtr, tk, bill, metrics, req, started, logger, reqID)
 			return
+		}
+
+		// Exact-match cache lookup. Best-effort: backend errors and miss
+		// fall through to the upstream call. A hit short-circuits the
+		// router, billing, and tokenizer paths — the response is byte-
+		// for-byte what we previously cached, so re-attributing tokens
+		// or recording a billing row would double-count.
+		//
+		// cacheKey is reused after the upstream call to write the
+		// response back; computing the key once keeps the hash work to
+		// O(request) rather than O(2 × request).
+		var cacheKey string
+		if exactCache != nil {
+			if key, err := cache.Key(req); err == nil {
+				cacheKey = key
+				lookupStart := time.Now()
+				cached, err := exactCache.Get(r.Context(), key)
+				lookupSec := time.Since(lookupStart).Seconds()
+				switch {
+				case err == nil:
+					metrics.ObserveCacheLookup("hit", lookupSec)
+					w.Header().Set("X-X-Beacon-Cache", "hit")
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusOK)
+					if encErr := jsonEncode(w, cached); encErr != nil {
+						logger.Error("failed to encode cached response",
+							zap.String("req_id", reqID),
+							zap.Error(encErr))
+					}
+					metrics.IncCacheHit("exact")
+					metrics.ObserveRequest(cached.Provider, req.Model, http.StatusOK, time.Since(started).Seconds())
+					return
+				case errors.Is(err, cache.ErrMiss):
+					metrics.ObserveCacheLookup("miss", lookupSec)
+					// Expected on cold keys — fall through to upstream.
+				default:
+					metrics.ObserveCacheLookup("error", lookupSec)
+					// Backend / decode error: log once and keep going.
+					// Cached corruption is auto-healed on the next Set.
+					logger.Warn("cache lookup failed; treating as miss",
+						zap.String("req_id", reqID),
+						zap.String("model", req.Model),
+						zap.Error(err))
+				}
+			}
+			w.Header().Set("X-X-Beacon-Cache", "miss")
 		}
 
 		resp, err := rtr.ChatCompletion(r.Context(), req)
@@ -111,6 +165,23 @@ func chatCompletionsHandler(rtr *router.Router, tk *tokenizer.Selector, bill *bi
 		// is missing (rare for non-stream), fall back to tokenizer
 		// estimates so the row is still useful for QPS / latency.
 		promptTok, completionTok := tokenCounts(tk, req, resp)
+
+		// Write-back to cache (Decision 3 anti-pollution gate). All
+		// four guards must hold: 200 (implicit — error branch already
+		// returned), finish_reason=stop, non-empty content, prompt
+		// tokens > 0. Set is best-effort; failures are logged but do
+		// not affect the client (response already written).
+		if cacheKey != "" && cacheTTL > 0 && shouldCacheResponse(resp, promptTok) {
+			if err := exactCache.Set(r.Context(), cacheKey, resp, cacheTTL); err != nil {
+				logger.Warn("cache write failed",
+					zap.String("req_id", reqID),
+					zap.String("model", req.Model),
+					zap.Error(err))
+			} else {
+				metrics.IncCacheWrite("exact")
+			}
+		}
+
 		metrics.ObserveRequest(resp.Provider, req.Model, http.StatusOK, time.Since(started).Seconds())
 		metrics.AddTokens(resp.Provider, req.Model, promptTok, completionTok)
 		emitBillingEvent(bill, billing.Event{
@@ -151,6 +222,38 @@ func tokenCounts(tk *tokenizer.Selector, req *provider.ChatRequest, resp *provid
 		}
 	}
 	return prompt, completion
+}
+
+// shouldCacheResponse enforces the Week 9 anti-pollution rules
+// (Decision 3): the response must be a fully-formed answer that a
+// future identical request can safely receive verbatim.
+//
+//   - finish_reason == "stop": rules out length-truncated, content-
+//     filtered, and tool-call branches; clients that hit these
+//     typically retry with different params, so caching them traps
+//     the next caller into the same dead end.
+//   - non-empty content in at least one choice: defends against the
+//     rare upstream that returns a 200 with empty assistant content.
+//   - promptTok > 0: a sanity check that the upstream returned (or
+//     we computed) plausible token counts; zero usually means the
+//     usage block was malformed and the response is suspect.
+//
+// 200-status is implicit — the error branch already returned before
+// reaching this gate.
+func shouldCacheResponse(resp *provider.ChatResponse, promptTok int) bool {
+	if resp == nil || promptTok <= 0 || len(resp.Choices) == 0 {
+		return false
+	}
+	first := resp.Choices[0]
+	if first.FinishReason != "stop" {
+		return false
+	}
+	for _, ch := range resp.Choices {
+		if ch.Message.Content != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // emitBillingEvent enqueues an event when the worker is wired. A nil

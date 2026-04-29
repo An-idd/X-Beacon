@@ -44,6 +44,17 @@ type Metrics struct {
 	// declared now so dashboards don't break later).
 	cacheHitsTotal *prometheus.CounterVec
 
+	// cacheWritesTotal counts successful Set() calls per cache type.
+	// Comparing this against cacheHitsTotal of the same type gives the
+	// rough hit/write ratio (a higher write count than hit count means
+	// the cache is filling up but not being read — a tuning signal).
+	cacheWritesTotal *prometheus.CounterVec
+
+	// cacheLookupDuration measures backend latency by outcome
+	// (hit|miss|error). Sub-millisecond expected; bucketing skews low
+	// because anything over 25 ms means Redis is the bottleneck.
+	cacheLookupDuration *prometheus.HistogramVec
+
 	// ratelimitRejectedTotal counts 429s by rule name (the user's
 	// configured `name` in rate_limits[]).
 	ratelimitRejectedTotal *prometheus.CounterVec
@@ -85,6 +96,15 @@ var latencyBuckets = []float64{
 	0.25, 0.5, 1, 2.5, 5, 10, 30,
 }
 
+// cacheLookupBuckets covers Redis-backed cache reads: a healthy LAN
+// hop is ~100-300 µs; anything past 10 ms is a failure mode worth
+// alerting on. Tighter than latencyBuckets at the low end because the
+// signal we care about is sub-millisecond.
+var cacheLookupBuckets = []float64{
+	0.0001, 0.00025, 0.0005, 0.001, 0.0025,
+	0.005, 0.01, 0.025, 0.1,
+}
+
 // NewMetrics constructs and registers the gateway metrics on reg.
 // Returns the bundle plus an error from MustRegister surfaced as a
 // regular error (so tests can fail cleanly instead of panicking).
@@ -115,6 +135,17 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 			Name: "gateway_cache_hits_total",
 			Help: "Cache hit count by type (exact|semantic). Populated in Week 9; declared now for dashboard stability.",
 		}, []string{"type"}),
+
+		cacheWritesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "gateway_cache_writes_total",
+			Help: "Successful cache Set() count by type (exact|semantic). Excludes responses filtered by the anti-pollution gate.",
+		}, []string{"type"}),
+
+		cacheLookupDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "gateway_cache_lookup_duration_seconds",
+			Help:    "Cache Get() backend latency by result (hit|miss|error).",
+			Buckets: cacheLookupBuckets,
+		}, []string{"result"}),
 
 		ratelimitRejectedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "gateway_ratelimit_rejected_total",
@@ -149,7 +180,8 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 
 	collectors := []prometheus.Collector{
 		m.requestsTotal, m.requestDuration, m.tokensTotal,
-		m.costMicroTotal, m.cacheHitsTotal, m.ratelimitRejectedTotal,
+		m.costMicroTotal, m.cacheHitsTotal, m.cacheWritesTotal,
+		m.cacheLookupDuration, m.ratelimitRejectedTotal,
 		m.routerFailoverTotal, m.breakerState,
 		m.billingDroppedTotal, m.billingWrittenTotal, m.pricingCacheSize,
 	}
@@ -203,6 +235,26 @@ func (m *Metrics) IncCacheHit(kind string) {
 		return
 	}
 	m.cacheHitsTotal.WithLabelValues(kind).Inc()
+}
+
+// IncCacheWrite increments after a successful cache Set(). Skipped
+// writes (anti-pollution gate, write errors) are intentionally not
+// counted — read this together with cacheHitsTotal to detect a cache
+// that's filling but not being read.
+func (m *Metrics) IncCacheWrite(kind string) {
+	if m == nil {
+		return
+	}
+	m.cacheWritesTotal.WithLabelValues(kind).Inc()
+}
+
+// ObserveCacheLookup records the latency of one Get() call. result
+// must be one of "hit", "miss", "error" so PromQL can split them.
+func (m *Metrics) ObserveCacheLookup(result string, durationSec float64) {
+	if m == nil {
+		return
+	}
+	m.cacheLookupDuration.WithLabelValues(result).Observe(durationSec)
 }
 
 // IncRatelimitReject bumps the rate-limit rejection counter for rule.

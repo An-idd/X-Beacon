@@ -12,6 +12,7 @@ import (
 
 	"github.com/An-idd/x-beacon/internal/auth"
 	"github.com/An-idd/x-beacon/internal/billing"
+	"github.com/An-idd/x-beacon/internal/cache"
 	"github.com/An-idd/x-beacon/internal/config"
 	"github.com/An-idd/x-beacon/internal/observability"
 	"github.com/An-idd/x-beacon/internal/provider/registry"
@@ -204,6 +205,34 @@ func loadRedis(ctx context.Context, cfg *config.Config, logger *zap.Logger) *red
 	}
 	logger.Info("redis ready", zap.String("addr", cfg.Redis.Addr))
 	return client
+}
+
+// buildExactCache wires the Week 9 exact-match response cache. It is
+// optional in three layered ways:
+//
+//  1. cache.exact.enabled = false → no cache layer at all
+//  2. Redis unconfigured / unreachable (rdb == nil) → silent skip;
+//     the auth-cache log line already explains why Redis is off.
+//  3. cache.exact.ttl <= 0 → reads still work, writes disabled
+//     (handler enforces this further down the call stack)
+//
+// Returns (Exact, ttl). A nil Exact + zero ttl means the chat handler
+// short-circuits the cache code path entirely.
+func buildExactCache(cfg *config.Config, rdb *redis.Client, logger *zap.Logger) (cache.Exact, time.Duration) {
+	if !cfg.Cache.Exact.Enabled {
+		logger.Info("exact cache disabled by config")
+		return nil, 0
+	}
+	if rdb == nil {
+		logger.Warn("exact cache requested but redis is unconfigured; cache disabled",
+			zap.String("hint", "set redis.addr in config.yaml"))
+		return nil, 0
+	}
+	ttl := cfg.Cache.Exact.TTL
+	logger.Info("exact cache ready",
+		zap.Duration("ttl", ttl),
+	)
+	return cache.NewRedisExact(rdb), ttl
 }
 
 // loadAuth wires the production Authenticator. From Step 4.3, that means

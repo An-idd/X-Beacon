@@ -150,6 +150,8 @@ func runWithCtx(ctx context.Context, args []string, stdout *os.File) error {
 		defer billingWorker.Stop(context.Background())
 	}
 
+	exactCache, cacheTTL := buildExactCache(cfg, rdb, logger)
+
 	srv, err := server.New(server.Deps{
 		Logger:            logger,
 		Registry:          reg,
@@ -160,6 +162,8 @@ func runWithCtx(ctx context.Context, args []string, stdout *os.File) error {
 		Metrics:           metrics,
 		Authn:             authn,
 		RateLimiter:       rateLimiter,
+		Cache:             exactCache,
+		CacheTTL:          cacheTTL,
 		MetricsReg:        metricsReg,
 		MetricsEnabled:    cfg.Observability.Metrics.Enabled,
 		MetricsPath:       cfg.Observability.Metrics.Path,

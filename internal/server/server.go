@@ -8,6 +8,7 @@ package server
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/prometheus/client_golang/prometheus"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/An-idd/x-beacon/internal/auth"
 	"github.com/An-idd/x-beacon/internal/billing"
+	"github.com/An-idd/x-beacon/internal/cache"
 	"github.com/An-idd/x-beacon/internal/observability"
 	"github.com/An-idd/x-beacon/internal/provider/registry"
 	"github.com/An-idd/x-beacon/internal/ratelimit"
@@ -68,6 +70,17 @@ type Deps struct {
 	// 8). Optional; nil-safe helpers everywhere so dev-mode without a
 	// metrics scrape target still serves traffic.
 	Metrics *observability.Metrics
+
+	// Cache is the exact-match response cache (Week 9). Optional —
+	// when nil, the chat handler skips the lookup/store path entirely.
+	// Only the non-streaming branch consults it; streaming responses
+	// bypass the cache until Week 10 adds synthetic-stream replay.
+	Cache cache.Exact
+
+	// CacheTTL is how long a successfully-cached response lives. Read
+	// from cache.exact.ttl in config.yaml; 0 disables writes (reads
+	// already short-circuit on a nil Cache).
+	CacheTTL time.Duration
 
 	// ReadinessCheckers feed /readyz. Order is preserved in the JSON body
 	// for stable parsing. nil/empty makes /readyz a trivial 200.
@@ -150,7 +163,7 @@ func New(deps Deps) (*Server, error) {
 		// (returns {"object":"list","data":[]}) so the gateway boots even when
 		// providers.yaml is absent.
 		v1.Get("/models", modelsHandler(deps.Registry))
-		v1.Post("/chat/completions", chatCompletionsHandler(deps.Router, deps.Tokenizer, deps.Billing, deps.Metrics, deps.Logger))
+		v1.Post("/chat/completions", chatCompletionsHandler(deps.Router, deps.Tokenizer, deps.Billing, deps.Metrics, deps.Cache, deps.CacheTTL, deps.Logger))
 	})
 
 	// /admin/* requires both Auth (so we have a Principal) and the
