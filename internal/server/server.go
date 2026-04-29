@@ -73,14 +73,21 @@ type Deps struct {
 
 	// Cache is the exact-match response cache (Week 9). Optional —
 	// when nil, the chat handler skips the lookup/store path entirely.
-	// Only the non-streaming branch consults it; streaming responses
-	// bypass the cache until Week 10 adds synthetic-stream replay.
+	// Both streaming and non-streaming branches consult it from
+	// Week 10; streaming hits replay as synthetic SSE.
 	Cache cache.Exact
 
 	// CacheTTL is how long a successfully-cached response lives. Read
 	// from cache.exact.ttl in config.yaml; 0 disables writes (reads
 	// already short-circuit on a nil Cache).
 	CacheTTL time.Duration
+
+	// Semantic is the similarity-based response cache (Week 10).
+	// Optional — when nil, the chat handler skips the semantic
+	// pipeline entirely and only consults Cache. When non-nil, the
+	// chat handler queries Semantic on exact-miss and writes to it
+	// alongside Cache on successful upstream responses.
+	Semantic cache.Semantic
 
 	// ReadinessCheckers feed /readyz. Order is preserved in the JSON body
 	// for stable parsing. nil/empty makes /readyz a trivial 200.
@@ -163,7 +170,7 @@ func New(deps Deps) (*Server, error) {
 		// (returns {"object":"list","data":[]}) so the gateway boots even when
 		// providers.yaml is absent.
 		v1.Get("/models", modelsHandler(deps.Registry))
-		v1.Post("/chat/completions", chatCompletionsHandler(deps.Router, deps.Tokenizer, deps.Billing, deps.Metrics, deps.Cache, deps.CacheTTL, deps.Logger))
+		v1.Post("/chat/completions", chatCompletionsHandler(deps.Router, deps.Tokenizer, deps.Billing, deps.Metrics, deps.Cache, deps.CacheTTL, deps.Semantic, deps.Logger))
 	})
 
 	// /admin/* requires both Auth (so we have a Principal) and the

@@ -29,6 +29,9 @@ func TestNewMetrics_RegistersAllCollectors(t *testing.T) {
 	m.IncCacheHit("exact")
 	m.IncCacheWrite("exact")
 	m.ObserveCacheLookup("hit", 0.0003)
+	m.ObserveSemanticSimilarity(0.97)
+	m.SetSemanticThreshold(0.95)
+	m.ObserveSemanticLookup("hit", 0.08)
 	m.IncRatelimitReject("global-rps")
 	m.IncFailover("a", "b")
 	m.SetBreakerState("p", 1)
@@ -51,6 +54,9 @@ func TestNewMetrics_RegistersAllCollectors(t *testing.T) {
 		"gateway_cache_hits_total",
 		"gateway_cache_writes_total",
 		"gateway_cache_lookup_duration_seconds",
+		"gateway_cache_semantic_similarity",
+		"gateway_cache_semantic_threshold",
+		"gateway_cache_semantic_lookup_duration_seconds",
 		"gateway_ratelimit_rejected_total",
 		"gateway_router_failover_total",
 		"gateway_breaker_state",
@@ -157,6 +163,37 @@ func TestCacheMetrics_HelpersAreNilSafeAndCount(t *testing.T) {
 	m.ObserveCacheLookup("error", 0.050)
 	// Three distinct label sets, each with one observation.
 	assert.Equal(t, 3, testutil.CollectAndCount(m.cacheLookupDuration))
+}
+
+func TestSemanticMetrics_HelpersAreNilSafeAndCount(t *testing.T) {
+	var nilM *Metrics
+	nilM.ObserveSemanticSimilarity(0.99)
+	nilM.SetSemanticThreshold(0.95)
+	nilM.ObserveSemanticLookup("hit", 0.05)
+
+	m, _ := newTestMetrics(t)
+	// Similarity histogram: zero/negative similarity must NOT be
+	// observed (skews the threshold-tuning view).
+	m.ObserveSemanticSimilarity(0.0)
+	m.ObserveSemanticSimilarity(-0.1)
+	assert.Equal(t, 1, testutil.CollectAndCount(m.semanticSimilarity), "no observations expected from zero/negative")
+
+	m.ObserveSemanticSimilarity(0.97)
+	m.ObserveSemanticSimilarity(0.83)
+	// CollectAndCount returns the number of distinct label sets, not
+	// the observation count — there's exactly one (no labels), and
+	// the histogram itself accumulates internally.
+
+	m.SetSemanticThreshold(0.95)
+	assert.Equal(t, 0.95, testutil.ToFloat64(m.semanticThreshold))
+	m.SetSemanticThreshold(0.90) // re-set
+	assert.Equal(t, 0.90, testutil.ToFloat64(m.semanticThreshold))
+
+	m.ObserveSemanticLookup("hit", 0.05)
+	m.ObserveSemanticLookup("miss", 0.07)
+	m.ObserveSemanticLookup("error", 1.5)
+	assert.Equal(t, 3, testutil.CollectAndCount(m.semanticLookupDuration),
+		"three distinct result labels should produce three series")
 }
 
 func TestNewMetrics_DuplicateRegistrationFails(t *testing.T) {

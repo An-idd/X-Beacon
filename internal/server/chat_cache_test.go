@@ -103,16 +103,16 @@ func TestChatCache_HitShortCircuitsUpstream(t *testing.T) {
 	assert.Equal(t, "chatcmpl-cached", resp["id"])
 }
 
-func TestChatCache_StreamRequestIsBypassed(t *testing.T) {
-	// Streaming bypasses the cache (Decision 4). The default fixture
-	// upstream replies with non-SSE JSON so the streaming router will
-	// surface a 502; we don't care about the streaming wire format here,
-	// only that the bypass header was emitted before the stream branch
-	// took over and that the upstream was contacted.
+func TestChatCache_StreamMissFallsThroughToUpstream(t *testing.T) {
+	// Week 10: streaming requests share keys with non-streaming. A
+	// cold-key stream must produce X-X-Beacon-Cache: miss and reach
+	// the upstream (the fixture's mock JSON-only upstream is fine —
+	// we don't care about stream body shape here, only the routing
+	// decision and the upstream-call count).
 	f := newChatCacheFixture(t)
 
 	rec := f.post(t, chatBody("test-model", "hello", true))
-	assert.Equal(t, "bypass", rec.Header().Get("X-X-Beacon-Cache"))
+	assert.Equal(t, "miss", rec.Header().Get("X-X-Beacon-Cache"))
 	assert.GreaterOrEqual(t, f.upstream.Load(), int64(1))
 }
 

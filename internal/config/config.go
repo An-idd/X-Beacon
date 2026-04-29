@@ -134,10 +134,15 @@ type ExactCacheConfig struct {
 }
 
 type SemanticCacheConfig struct {
-	Enabled        bool    `mapstructure:"enabled"`
-	Threshold      float64 `mapstructure:"threshold"`
-	EmbeddingModel string  `mapstructure:"embedding_model"`
-	TopK           int     `mapstructure:"top_k"`
+	Enabled            bool    `mapstructure:"enabled"`
+	Threshold          float64 `mapstructure:"threshold"`
+	EmbeddingModel     string  `mapstructure:"embedding_model"`
+	EmbeddingEndpoint  string  `mapstructure:"embedding_endpoint"`
+	EmbeddingAPIKey    string  `mapstructure:"embedding_api_key"`
+	EmbeddingDimensions int    `mapstructure:"embedding_dimensions"`
+	TopK               int     `mapstructure:"top_k"`
+	QueryLRUCapacity   int     `mapstructure:"query_lru_capacity"`
+	IndexNamePrefix    string  `mapstructure:"index_name_prefix"`
 }
 
 // RateLimitRule is one entry in `rate_limits:` of config.yaml. Mirrors

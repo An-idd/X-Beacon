@@ -129,7 +129,33 @@ cache:
     enabled: true
     ttl: 1h
   semantic:
+    # Off by default — enabling pulls in OpenAI embedding costs and a
+    # RediSearch index per model (~6 KiB per 1.5k-dim vector + HNSW
+    # graph overhead). Turn on once your prompt diversity is low enough
+    # that the cost vs. cache-hit math actually wins.
     enabled: false
+    # Cosine similarity (NOT distance). 0.95 = "near-identical
+    # semantics"; lower values trade recall for false-positive risk.
     threshold: 0.95
+    # Vector inputs / KNN ranker. Defaults match a typical OpenAI
+    # account; swap embedding_endpoint to point at Azure or a private
+    # gateway if needed.
     embedding_model: text-embedding-3-small
+    embedding_endpoint: https://api.openai.com
+    # Falls back to $OPENAI_API_KEY if empty after env-expansion.
+    embedding_api_key: ${OPENAI_API_KEY:-}
+    # 0 = use the embedder's native dimension (1536 for the small
+    # model). Lower truncates the vector to save Redis index memory at
+    # the cost of recall.
+    embedding_dimensions: 0
+    # KNN candidate count per lookup. K=1 is sufficient; larger leaves
+    # room for re-ranking experiments later.
     top_k: 5
+    # Per-process LRU on flatten(text) → vector. Each entry ≈
+    # 4*dim+text bytes (~6 KiB at 1536 dim); 1024 ≈ 6 MiB.
+    query_lru_capacity: 1024
+    # Per-model RediSearch IndexName prefix. Decision 2 (Phase 3):
+    # one index per model for true cross-model isolation. Drop a
+    # model's cache via:
+    #   FT.DROPINDEX <prefix><sanitized-model> DD
+    index_name_prefix: x_beacon_semcache_
