@@ -116,6 +116,19 @@ type Metrics struct {
 	// loaded. Drops to 0 = startup reload failed; grows after admin
 	// upserts or the periodic reload.
 	pricingCacheSize prometheus.Gauge
+
+	// Week 12 additions — prompt compression observability.
+
+	// promptCompressedTotal counts the requests that actually had
+	// messages dropped. Below-trigger requests are NOT recorded here
+	// (would dominate the counter and hide the signal). Pair with
+	// gateway_requests_total for compression share per model.
+	promptCompressedTotal *prometheus.CounterVec
+
+	// promptTokensSaved is a histogram of (TokensBefore - TokensAfter)
+	// — i.e. how much was actually trimmed. Observed only when
+	// compression fired so the histogram isn't pinned at 0.
+	promptTokensSaved prometheus.Histogram
 }
 
 // latencyBuckets covers the LLM-gateway dynamic range: ~5 ms (cache
@@ -241,6 +254,17 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 			Name: "gateway_pricing_cache_size",
 			Help: "Number of model_pricing rows currently loaded into the in-memory cache.",
 		}),
+
+		promptCompressedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "gateway_prompt_compressed_total",
+			Help: "Requests where the prompt compressor dropped at least one message, labeled by model.",
+		}, []string{"model"}),
+
+		promptTokensSaved: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "gateway_prompt_tokens_saved",
+			Help:    "Tokens removed from the prompt by the compressor. Observed only when compression fired.",
+			Buckets: prometheus.ExponentialBuckets(64, 2, 12), // 64 → 131072
+		}),
 	}
 
 	collectors := []prometheus.Collector{
@@ -251,6 +275,7 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		m.ratelimitRejectedTotal,
 		m.routerFailoverTotal, m.breakerState,
 		m.billingDroppedTotal, m.billingWrittenTotal, m.pricingCacheSize,
+		m.promptCompressedTotal, m.promptTokensSaved,
 	}
 	for _, c := range collectors {
 		if err := reg.Register(c); err != nil {
@@ -423,6 +448,20 @@ func (m *Metrics) SetPricingCacheSize(n int) {
 		return
 	}
 	m.pricingCacheSize.Set(float64(n))
+}
+
+// ObservePromptCompressed records one request that had messages
+// dropped. tokensSaved is the difference between pre- and post-
+// compression prompt tokens; values <= 0 are skipped (defensive —
+// a successful compression always reduces tokens).
+func (m *Metrics) ObservePromptCompressed(model string, tokensSaved int) {
+	if m == nil {
+		return
+	}
+	m.promptCompressedTotal.WithLabelValues(model).Inc()
+	if tokensSaved > 0 {
+		m.promptTokensSaved.Observe(float64(tokensSaved))
+	}
 }
 
 // statusLabel coalesces ranges so we don't explode cardinality with

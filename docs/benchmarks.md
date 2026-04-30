@@ -157,3 +157,73 @@ scp bin/x-beacon bin/xbctl will@10.109.8.217:~/xbeacon-bench/
 ssh will@10.109.8.217 'pkill x-beacon; ~/xbeacon-bench/x-beacon --config ~/xbeacon-bench/config.yaml &'
 ssh will@10.109.8.217 'echo "GET http://127.0.0.1:8080/healthz" | ~/xbeacon-bench/vegeta attack -rate=10000 -duration=15s | ~/xbeacon-bench/vegeta report'
 ```
+
+---
+
+## Week 12 — Phase 3 full-stack acceptance (M3, procedure)
+
+**Goal**: confirm the Phase 3 layers (exact cache + semantic cache +
+smart routing + prompt compression) do not regress the Week 8 chat-path
+baseline.
+
+Acceptance: **P99 < 5 ms** on the empty-request path (`/healthz`) at
+5000 RPS sustained, AND chat-path P99 stays within ±25% of the Week 8
+1.21 ms / 1000 RPS number when all Phase 3 layers are enabled.
+
+### Procedure
+
+1. Configure the gateway with every Phase 3 feature on:
+   ```yaml
+   cache:
+     exact:    { enabled: true,  ttl: 1h }
+     semantic: { enabled: true,  threshold: 0.95, top_k: 5 }
+   routing:
+     enabled: true
+     rules:
+       - name: tiny-to-mini
+         route_to: gpt-4o-mini
+         when: { max_tokens: 200 }
+   prompt:
+     compression:
+       enabled:           true
+       trigger_ratio:     0.8
+       min_keep_messages: 2
+   ```
+2. Start the mock upstream (`scripts/mockupstream`) and the gateway.
+3. Run the existing `scripts/bench.sh` profile — the chat case feeds
+   the same identical payload at high RPS, which produces a 100% exact-
+   cache hit ratio after warm-up. That's the cache-warm number.
+4. To measure cache-cold throughput, swap the bench body for one that
+   varies a token per request (e.g. inject a uuid into the user
+   message). That blows past exact and exercises semantic + upstream.
+
+### Results
+
+> **TODO** — populate after the Week 12 run. The Week 8 baseline
+> (P99 1.21 ms @ 1000 RPS) is the headline number to beat or hold;
+> the cache-hit branch should be substantially faster (Week 9 smoke
+> measured ~25× speedup on hit, so we expect P99 well under 200 µs
+> on a 100% hit profile).
+
+### Observability checks during the run
+
+These metrics tell you which layer was actually exercised:
+
+- `gateway_cache_hits_total{type="exact"}` — should grow once per
+  request in the warm phase.
+- `gateway_cache_hits_total{type="semantic"}` — only fires for the
+  semantic test variant.
+- `gateway_router_decision_total` — only fires when a routing rule
+  fires; baseline body matches the `tiny-to-mini` rule above.
+- `gateway_prompt_compressed_total` — flat at zero for short bench
+  payloads (correct: well under trigger ratio).
+
+### Open items deferred to production rollout
+
+- **Semantic hit rate ≥ 30%**: requires a real embedder + an organic
+  workload (educational QA dataset proposed but not collected). Plan:
+  capture two weeks of post-launch traffic, replay against the cache
+  with `XBEACON_TEST_REDIS_STACK_ADDR` pointing at a scratch Redis,
+  measure `gateway_cache_hits_total{type="semantic"} / requests`. The
+  Week 8 mock embedder produces deterministic vectors, so a synthetic
+  hit-rate from this bench is meaningless.

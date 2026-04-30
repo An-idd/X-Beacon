@@ -224,19 +224,23 @@ curl -s localhost:8080/readyz | jq .
 - [X]  API key 管理
 - [X]  基础可观测性
 
-### 🚧 进行中（v0.2 - 企业级特性）
+### ✅ 已完成（v0.2 - 企业级特性）
 
-- [ ]  分布式限流（Redis 实现）
-- [ ]  自动重试与降级
-- [ ]  熔断器
-- [ ]  Token 精确计数与成本统计
-- [ ]  Prometheus 指标完善
+- [X]  分布式限流（Redis 滑动窗口 + 内存令牌桶）
+- [X]  自动重试与降级（full-jitter 指数退避 + 主备 chain）
+- [X]  熔断器（per-provider gobreaker，4xx 不计 failure）
+- [X]  Token 精确计数与成本统计（cl100k BPE + 异步 request_logs）
+- [X]  Prometheus 指标完善（13 个核心 collector + Grafana dashboard）
 
-### 📋 计划中（v0.3 - 差异化亮点）
+### ✅ 已完成（v0.3 - 差异化亮点）
 
-- [ ]  语义缓存（HNSW 索引）
-- [ ]  智能路由（任务复杂度识别）
-- [ ]  Prompt 优化（自动压缩、上下文裁剪）
+- [X]  精确缓存（Redis sha256 key + 4 条防污染门槛）
+- [X]  语义缓存（RediSearch HNSW + per-model 索引隔离）
+- [X]  智能路由（规则引擎：token 数 + 关键词，A/B opt-out via scope）
+- [X]  Prompt 优化（system 永留 + 滑动窗口 + token 预算）
+
+### 📋 计划中（v0.4+）
+
 - [ ]  管理面板（Web UI）
 - [ ]  多租户隔离
 
@@ -251,6 +255,7 @@ curl -s localhost:8080/readyz | jq .
 
 - [架构设计](docs/architecture.md) - 系统架构、关键决策、权衡分析
 - [性能基准](docs/benchmarks.md) - 压测方法与完整数据
+- [运维手册](docs/runbook.md) - cache / 路由 / 压缩 / billing 常见运维动作
 - [部署指南](docs/deployment.md) - 生产环境部署最佳实践
 - [配置参考](docs/configuration.md) - 所有配置项说明
 - [贡献指南](CONTRIBUTING.md) - 如何参与贡献

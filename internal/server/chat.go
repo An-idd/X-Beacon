@@ -14,6 +14,7 @@ import (
 	"github.com/An-idd/x-beacon/internal/billing"
 	"github.com/An-idd/x-beacon/internal/cache"
 	"github.com/An-idd/x-beacon/internal/observability"
+	"github.com/An-idd/x-beacon/internal/prompt"
 	"github.com/An-idd/x-beacon/internal/provider"
 	"github.com/An-idd/x-beacon/internal/route"
 	"github.com/An-idd/x-beacon/internal/router"
@@ -49,7 +50,7 @@ const streamHeartbeatInterval = 15 * time.Second
 // tokenizer / billing may be nil; the handler degrades gracefully (no
 // token attribution / no billing rows) so dev-mode without DB still
 // boots and serves traffic.
-func chatCompletionsHandler(rtr *router.Router, tk *tokenizer.Selector, bill *billing.Worker, metrics *observability.Metrics, exactCache cache.Exact, cacheTTL time.Duration, semanticCache cache.Semantic, classifier route.Classifier, logger *zap.Logger) http.HandlerFunc {
+func chatCompletionsHandler(rtr *router.Router, tk *tokenizer.Selector, bill *billing.Worker, metrics *observability.Metrics, exactCache cache.Exact, cacheTTL time.Duration, semanticCache cache.Semantic, classifier route.Classifier, compressor prompt.Compressor, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reqID := middleware.RequestIDFrom(r.Context())
 		started := time.Now()
@@ -96,6 +97,29 @@ func chatCompletionsHandler(rtr *router.Router, tk *tokenizer.Selector, bill *bi
 				}
 			}
 			classifySpan.End()
+		}
+
+		// Prompt compression (Week 12). Runs AFTER the classifier (so
+		// routing rules see the original prompt) and BEFORE the cache
+		// lookup (so cache keys reflect what the upstream will actually
+		// see). No-op when compressor is nil or the prompt fits the
+		// configured budget. Mutates req.Messages in place to stay
+		// consistent with Classifier's req.Model rewrite.
+		if compressor != nil {
+			compressCtx, compressSpan := observability.Tracer().Start(r.Context(), "prompt.compress")
+			res := compressor.Compress(req)
+			compressSpan.SetAttributes(
+				attribute.Bool("prompt.compressed", res.Compressed),
+				attribute.Int("prompt.tokens_before", res.TokensBefore),
+				attribute.Int("prompt.tokens_after", res.TokensAfter),
+				attribute.Int("prompt.removed_messages", res.RemovedMessages),
+			)
+			compressSpan.End()
+			_ = compressCtx
+			if res.Compressed {
+				w.Header().Set("X-X-Beacon-Prompt-Compressed", "1")
+				metrics.ObservePromptCompressed(req.Model, res.TokensBefore-res.TokensAfter)
+			}
 		}
 
 		// Pre-flight: surface 400 model_not_found before invoking the

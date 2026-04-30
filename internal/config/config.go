@@ -27,6 +27,23 @@ type Config struct {
 	Routing       RoutingConfig       `mapstructure:"routing"`
 	Billing       BillingConfig       `mapstructure:"billing"`
 	Cache         CacheConfig         `mapstructure:"cache"`
+	Prompt        PromptConfig        `mapstructure:"prompt"`
+}
+
+// PromptConfig configures the Week 12 context-truncation layer. Disabled
+// by default; opt-in by setting `prompt.compression.enabled: true`.
+// Triggered only when prompt tokens exceed `window * trigger_ratio`,
+// so well-behaved short prompts never pay any cost.
+type PromptConfig struct {
+	Compression PromptCompressionConfig `mapstructure:"compression"`
+}
+
+type PromptCompressionConfig struct {
+	Enabled         bool           `mapstructure:"enabled"`
+	TriggerRatio    float64        `mapstructure:"trigger_ratio"`
+	MinKeepMessages int            `mapstructure:"min_keep_messages"`
+	DefaultWindow   int            `mapstructure:"default_window"`
+	ModelWindows    map[string]int `mapstructure:"model_windows"`
 }
 
 // RoutingConfig is Week 11's smart-routing layer. The chat handler
@@ -265,6 +282,11 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("cache.semantic.threshold", 0.95)
 	v.SetDefault("cache.semantic.embedding_model", "text-embedding-3-small")
 	v.SetDefault("cache.semantic.top_k", 5)
+
+	v.SetDefault("prompt.compression.enabled", false)
+	v.SetDefault("prompt.compression.trigger_ratio", 0.8)
+	v.SetDefault("prompt.compression.min_keep_messages", 2)
+	v.SetDefault("prompt.compression.default_window", 128_000)
 }
 
 // Validate checks for conflicting or out-of-range settings.
@@ -308,6 +330,18 @@ func (c *Config) Validate() error {
 		}
 		if c.Cache.Semantic.TopK <= 0 {
 			errs = append(errs, errors.New("cache.semantic.top_k must be > 0"))
+		}
+	}
+
+	if c.Prompt.Compression.Enabled {
+		if r := c.Prompt.Compression.TriggerRatio; r <= 0 || r > 1 {
+			errs = append(errs, fmt.Errorf("prompt.compression.trigger_ratio %v out of (0,1]", r))
+		}
+		if c.Prompt.Compression.DefaultWindow <= 0 {
+			errs = append(errs, errors.New("prompt.compression.default_window must be > 0"))
+		}
+		if c.Prompt.Compression.MinKeepMessages < 0 {
+			errs = append(errs, errors.New("prompt.compression.min_keep_messages must be >= 0"))
 		}
 	}
 

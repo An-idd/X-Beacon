@@ -19,6 +19,7 @@ import (
 	"github.com/An-idd/x-beacon/internal/billing"
 	"github.com/An-idd/x-beacon/internal/cache"
 	"github.com/An-idd/x-beacon/internal/observability"
+	"github.com/An-idd/x-beacon/internal/prompt"
 	"github.com/An-idd/x-beacon/internal/provider/registry"
 	"github.com/An-idd/x-beacon/internal/ratelimit"
 	"github.com/An-idd/x-beacon/internal/route"
@@ -89,6 +90,14 @@ type Deps struct {
 	// chat handler queries Semantic on exact-miss and writes to it
 	// alongside Cache on successful upstream responses.
 	Semantic cache.Semantic
+
+	// Compressor is the prompt-truncation layer (Week 12). Optional —
+	// when nil, prompts pass through verbatim. When non-nil, the
+	// chat handler runs Compress *after* Classifier (so routing
+	// sees the original prompt) and *before* the cache lookup (so
+	// cache keys reflect the truncated form). Mutates req.Messages
+	// in place on a non-trivial Result.
+	Compressor prompt.Compressor
 
 	// Classifier is the smart-routing layer (Week 11). Optional —
 	// when nil, requests pass through with their requested model
@@ -178,7 +187,7 @@ func New(deps Deps) (*Server, error) {
 		// (returns {"object":"list","data":[]}) so the gateway boots even when
 		// providers.yaml is absent.
 		v1.Get("/models", modelsHandler(deps.Registry))
-		v1.Post("/chat/completions", chatCompletionsHandler(deps.Router, deps.Tokenizer, deps.Billing, deps.Metrics, deps.Cache, deps.CacheTTL, deps.Semantic, deps.Classifier, deps.Logger))
+		v1.Post("/chat/completions", chatCompletionsHandler(deps.Router, deps.Tokenizer, deps.Billing, deps.Metrics, deps.Cache, deps.CacheTTL, deps.Semantic, deps.Classifier, deps.Compressor, deps.Logger))
 	})
 
 	// /admin/* requires both Auth (so we have a Principal) and the

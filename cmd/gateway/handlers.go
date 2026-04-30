@@ -15,6 +15,7 @@ import (
 	"github.com/An-idd/x-beacon/internal/cache"
 	"github.com/An-idd/x-beacon/internal/config"
 	"github.com/An-idd/x-beacon/internal/observability"
+	"github.com/An-idd/x-beacon/internal/prompt"
 	"github.com/An-idd/x-beacon/internal/provider/registry"
 	"github.com/An-idd/x-beacon/internal/ratelimit"
 	"github.com/An-idd/x-beacon/internal/route"
@@ -370,6 +371,42 @@ func buildClassifier(cfg *config.Config, tk *tokenizer.Selector, logger *zap.Log
 	}
 	logger.Info("smart routing ready", zap.Int("rules", len(rules)))
 	return classifier
+}
+
+// buildCompressor constructs the Week 12 prompt-compressor from
+// PromptConfig. Two layered fallbacks:
+//
+//  1. prompt.compression.enabled = false (or block absent) → nil
+//     (compression disabled, requests pass through verbatim)
+//  2. tokenizer is nil → nil (the compressor cannot estimate budget
+//     without one; we'd rather skip than guess)
+//
+// Defaults applied by config.setDefaults are trusted by the time
+// we get here — the SlidingWindow constructor also defends, but
+// the config layer is authoritative.
+func buildCompressor(cfg *config.Config, tk *tokenizer.Selector, logger *zap.Logger) prompt.Compressor {
+	pc := cfg.Prompt.Compression
+	if !pc.Enabled {
+		logger.Info("prompt compression disabled by config")
+		return nil
+	}
+	if tk == nil {
+		logger.Warn("prompt compression enabled but tokenizer unavailable; compression disabled")
+		return nil
+	}
+	c := prompt.NewSlidingWindow(prompt.SlidingWindowOptions{
+		Tokenizer:       tk,
+		DefaultWindow:   pc.DefaultWindow,
+		Windows:         pc.ModelWindows,
+		TriggerRatio:    pc.TriggerRatio,
+		MinKeepMessages: pc.MinKeepMessages,
+	})
+	logger.Info("prompt compression ready",
+		zap.Float64("trigger_ratio", pc.TriggerRatio),
+		zap.Int("default_window", pc.DefaultWindow),
+		zap.Int("min_keep_messages", pc.MinKeepMessages),
+		zap.Int("model_windows", len(pc.ModelWindows)))
+	return c
 }
 
 // loadAuth wires the production Authenticator. From Step 4.3, that means
