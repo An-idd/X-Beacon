@@ -132,6 +132,12 @@ type ServerConfig struct {
 	ReadTimeout     time.Duration `mapstructure:"read_timeout"`
 	WriteTimeout    time.Duration `mapstructure:"write_timeout"`
 	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout"`
+
+	// AdminCORSOrigins is the explicit allowlist for /admin/* CORS.
+	// Empty (default) = no CORS headers emitted = browsers reject any
+	// cross-origin request. Wildcards intentionally not supported;
+	// list each WebUI host explicitly.
+	AdminCORSOrigins []string `mapstructure:"admin_cors_origins"`
 }
 
 type LogConfig struct {

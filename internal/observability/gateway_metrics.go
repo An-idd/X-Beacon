@@ -1,6 +1,8 @@
 package observability
 
 import (
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -129,6 +131,20 @@ type Metrics struct {
 	// — i.e. how much was actually trimmed. Observed only when
 	// compression fired so the histogram isn't pinned at 0.
 	promptTokensSaved prometheus.Histogram
+
+	// timeseries is the in-memory ring buffer feeding
+	// /admin/stats/timeseries. Updated alongside Prometheus counters
+	// in ObserveRequest. Reset on process restart by design (see
+	// TimeSeries doc); /admin/stats/summary publishes `since` for
+	// dashboard transparency.
+	timeseries *TimeSeries
+
+	// startedAt is the construction time of this Metrics bundle —
+	// used by /admin/stats/summary to publish a `since` field so
+	// the WebUI can show "data since <when>". Same lifetime as
+	// timeseries; promoted to its own field because tests may want
+	// to pin it independently.
+	startedAt time.Time
 }
 
 // latencyBuckets covers the LLM-gateway dynamic range: ~5 ms (cache
@@ -265,6 +281,9 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 			Help:    "Tokens removed from the prompt by the compressor. Observed only when compression fired.",
 			Buckets: prometheus.ExponentialBuckets(64, 2, 12), // 64 → 131072
 		}),
+
+		timeseries: NewTimeSeries(),
+		startedAt:  time.Now(),
 	}
 
 	collectors := []prometheus.Collector{
@@ -289,12 +308,35 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 
 // ObserveRequest records the response of one /v1/chat/completions call.
 // status is the gateway's external HTTP status, not the upstream's.
+//
+// Also feeds the in-memory TimeSeries used by /admin/stats/timeseries.
+// Single integration point keeps the chat handler's call sites
+// branch-free — every ObserveRequest is also a timeseries record.
 func (m *Metrics) ObserveRequest(provider, model string, status int, durationSec float64) {
 	if m == nil {
 		return
 	}
 	m.requestsTotal.WithLabelValues(provider, model, statusLabel(status)).Inc()
 	m.requestDuration.WithLabelValues(provider, model).Observe(durationSec)
+	m.timeseries.Record(status)
+}
+
+// TimeSeries returns the embedded /admin/stats/timeseries source.
+// nil-safe so callers in dev mode (no metrics) don't have to guard.
+func (m *Metrics) TimeSeries() *TimeSeries {
+	if m == nil {
+		return nil
+	}
+	return m.timeseries
+}
+
+// StartedAt returns when this Metrics bundle was constructed; used
+// by /admin/stats/summary to publish a `since` field.
+func (m *Metrics) StartedAt() time.Time {
+	if m == nil {
+		return time.Time{}
+	}
+	return m.startedAt
 }
 
 // AddTokens records prompt + completion token counts. Both halves are

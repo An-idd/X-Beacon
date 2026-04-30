@@ -126,6 +126,31 @@ routing:
 
 ---
 
+## 3.5 Scope 列表（API key 权限）
+
+API key 的 scope 是字符串元组 `category:value`（JSONB 存在 `api_keys.scopes`）。
+`xbctl keygen --scope cat:val` 签发；中间件用 `RequireScope(category, value)` 守路由。
+
+| Scope | 受保护资源 | 谁应该有 |
+|-------|-----------|---------|
+| `admin:webui` | `/admin/keys/*` / `/admin/logs` / `/admin/stats/*` | WebUI 运维账号 |
+| `admin:pricing` | `/admin/pricing/*`（GET/PUT/DELETE） | 财务 / 定价管理员 |
+| `smart_route:disable` | 路由层短路（A/B 对照组） | 实验对照组的客户端 key |
+| _(empty)_ | 仅 `/v1/*`（OpenAI 兼容 API） | 普通业务 key |
+
+**约定**：
+- 格式严格 `^[a-z]+:[a-z_]+$`（admin endpoint 强制校验，CLI 不强制但建议遵守）
+- 多 scope：`xbctl keygen --scope admin:webui --scope admin:pricing`
+- 想看某 key 的 scope：`xbctl keylist | grep <id>`
+- 不存在"super-admin"全权 scope；缺哪个加哪个
+
+**新增 scope 流程**：
+1. 在本表新增一行
+2. handler 加 `RequireScope("category", "value")` middleware
+3. 给运维签新 key（旧 key 不会自动获得新 scope）
+
+---
+
 ## 4. Prompt 压缩（context truncation）
 
 **模块**：`internal/prompt/compressor.go`。

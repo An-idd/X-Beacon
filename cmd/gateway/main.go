@@ -155,6 +155,11 @@ func runWithCtx(ctx context.Context, args []string, stdout *os.File) error {
 	classifier := buildClassifier(cfg, tk, logger)
 	compressor := buildCompressor(cfg, tk, logger)
 
+	var keystore *auth.Keystore
+	if pool != nil {
+		keystore = auth.NewKeystore(pool, rdb, logger)
+	}
+
 	srv, err := server.New(server.Deps{
 		Logger:            logger,
 		Registry:          reg,
@@ -162,6 +167,9 @@ func runWithCtx(ctx context.Context, args []string, stdout *os.File) error {
 		Tokenizer:         tk,
 		Billing:           billingWorker,
 		Pricing:           pricingCache,
+		Keystore:          keystore,
+		StoragePool:       pool,
+		Stats:             observability.NewStatsCollector(metricsReg, metrics.StartedAt()),
 		Metrics:           metrics,
 		Authn:             authn,
 		RateLimiter:       rateLimiter,
@@ -173,6 +181,7 @@ func runWithCtx(ctx context.Context, args []string, stdout *os.File) error {
 		MetricsReg:        metricsReg,
 		MetricsEnabled:    cfg.Observability.Metrics.Enabled,
 		MetricsPath:       cfg.Observability.Metrics.Path,
+		AdminCORSOrigins:  cfg.Server.AdminCORSOrigins,
 		ServiceName:       cfg.Observability.Tracing.ServiceName,
 		ReadinessCheckers: checkers,
 	})

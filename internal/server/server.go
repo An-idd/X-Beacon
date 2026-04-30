@@ -25,6 +25,7 @@ import (
 	"github.com/An-idd/x-beacon/internal/route"
 	"github.com/An-idd/x-beacon/internal/router"
 	"github.com/An-idd/x-beacon/internal/server/middleware"
+	"github.com/An-idd/x-beacon/internal/storage"
 	"github.com/An-idd/x-beacon/pkg/tokenizer"
 )
 
@@ -67,6 +68,24 @@ type Deps struct {
 	// /admin/pricing routes are mounted and protected by the
 	// admin:pricing scope. Optional in dev mode.
 	Pricing *billing.PricingCache
+
+	// Keystore exposes /admin/keys CRUD. When non-nil, list / create /
+	// revoke endpoints mount under /admin/keys with the admin:webui
+	// scope guard. Optional in dev mode (no DB → no Keystore → no
+	// admin keys surface; xbctl still works for ops out-of-band).
+	Keystore *auth.Keystore
+
+	// StoragePool backs /admin/logs (request_logs lookups). When
+	// non-nil, the logs endpoint mounts under /admin/logs with the
+	// admin:webui scope guard. Optional — dev mode without DB skips
+	// this surface.
+	StoragePool *storage.Pool
+
+	// Stats backs /admin/stats/summary. When non-nil, the summary
+	// endpoint mounts under the admin:webui scope guard. Built from
+	// the same registry that serves /metrics; cached at the
+	// collector layer.
+	Stats *observability.StatsCollector
 
 	// Metrics is the gateway-specific Prometheus metric bundle (Week
 	// 8). Optional; nil-safe helpers everywhere so dev-mode without a
@@ -114,6 +133,12 @@ type Deps struct {
 	// agnostic to the full config shape — easier to test and reuse.
 	MetricsEnabled bool
 	MetricsPath    string
+
+	// AdminCORSOrigins is the explicit allowlist for /admin/* CORS.
+	// Empty (default) = no CORS headers emitted; browsers reject any
+	// cross-origin request. List each WebUI host explicitly; wildcards
+	// are not supported by the middleware.
+	AdminCORSOrigins []string
 
 	// ServiceName labels OTel spans created by the Tracing middleware.
 	// Defaults to "x-beacon" if empty.
@@ -190,15 +215,49 @@ func New(deps Deps) (*Server, error) {
 		v1.Post("/chat/completions", chatCompletionsHandler(deps.Router, deps.Tokenizer, deps.Billing, deps.Metrics, deps.Cache, deps.CacheTTL, deps.Semantic, deps.Classifier, deps.Compressor, deps.Logger))
 	})
 
-	// /admin/* requires both Auth (so we have a Principal) and the
-	// admin:pricing scope on it. Mounted only when a PricingCache was
-	// supplied — dev-mode boots without DB still serve /v1/* but skip
-	// the admin surface.
-	if deps.Pricing != nil && deps.Authn != nil {
-		r.Route("/admin/pricing", func(adm chi.Router) {
-			adm.Use(middleware.Auth(deps.Authn, deps.Logger))
-			adm.Use(middleware.RequireScope("admin", "pricing", deps.Logger))
-			adm.Mount("/", adminPricingHandlers(deps.Pricing, deps.Logger))
+	// /admin/* umbrella. CORS sits here, BEFORE Auth, so browser
+	// preflight (OPTIONS, no Authorization) can complete the handshake.
+	// Each sub-feature (pricing / keys / logs / stats) registers its
+	// own subroute with its own scope guard inside the umbrella.
+	//
+	// Mounted only when Authn is configured — dev-mode without DB
+	// boots and serves /v1/* but skips the admin surface entirely.
+	if deps.Authn != nil {
+		r.Route("/admin", func(adm chi.Router) {
+			adm.Use(middleware.CORS(deps.AdminCORSOrigins))
+
+			if deps.Pricing != nil {
+				adm.Route("/pricing", func(p chi.Router) {
+					p.Use(middleware.Auth(deps.Authn, deps.Logger))
+					p.Use(middleware.RequireScope("admin", "pricing", deps.Logger))
+					p.Mount("/", adminPricingHandlers(deps.Pricing, deps.Logger))
+				})
+			}
+
+			if deps.Keystore != nil {
+				adm.Route("/keys", func(k chi.Router) {
+					k.Use(middleware.Auth(deps.Authn, deps.Logger))
+					k.Use(middleware.RequireScope("admin", "webui", deps.Logger))
+					k.Mount("/", adminKeysHandlers(deps.Keystore, deps.Logger))
+				})
+			}
+
+			if deps.StoragePool != nil {
+				adm.Route("/logs", func(l chi.Router) {
+					l.Use(middleware.Auth(deps.Authn, deps.Logger))
+					l.Use(middleware.RequireScope("admin", "webui", deps.Logger))
+					l.Get("/", adminLogsHandler(deps.StoragePool, deps.Logger))
+				})
+			}
+
+			if deps.Stats != nil && deps.Metrics != nil {
+				adm.Route("/stats", func(s chi.Router) {
+					s.Use(middleware.Auth(deps.Authn, deps.Logger))
+					s.Use(middleware.RequireScope("admin", "webui", deps.Logger))
+					s.Get("/summary", adminStatsSummaryHandler(deps.Stats, deps.Logger))
+					s.Get("/timeseries", adminStatsTimeseriesHandler(deps.Metrics.TimeSeries()))
+				})
+			}
 		})
 	}
 
