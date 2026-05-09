@@ -15,6 +15,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.uber.org/zap"
 
+	"github.com/An-idd/x-beacon/internal/audit"
 	"github.com/An-idd/x-beacon/internal/auth"
 	"github.com/An-idd/x-beacon/internal/config"
 	"github.com/An-idd/x-beacon/internal/observability"
@@ -156,8 +157,10 @@ func runWithCtx(ctx context.Context, args []string, stdout *os.File) error {
 	compressor := buildCompressor(cfg, tk, logger)
 
 	var keystore *auth.Keystore
+	var auditRecorder audit.Recorder = audit.Nop()
 	if pool != nil {
 		keystore = auth.NewKeystore(pool, rdb, logger)
+		auditRecorder = audit.NewPostgres(pool)
 	}
 
 	srv, err := server.New(server.Deps{
@@ -170,6 +173,9 @@ func runWithCtx(ctx context.Context, args []string, stdout *os.File) error {
 		Keystore:          keystore,
 		StoragePool:       pool,
 		Stats:             observability.NewStatsCollector(metricsReg, metrics.StartedAt()),
+		CacheStats:        observability.NewCacheStatsCollector(metricsReg, metrics.StartedAt()),
+		RateLimitRules:    cfg.RateLimits,
+		Audit:             auditRecorder,
 		Metrics:           metrics,
 		Authn:             authn,
 		RateLimiter:       rateLimiter,

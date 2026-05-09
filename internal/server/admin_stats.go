@@ -36,6 +36,27 @@ func adminStatsSummaryHandler(stats *observability.StatsCollector, logger *zap.L
 	}
 }
 
+// adminStatsCacheHandler exposes /admin/stats/cache — the v0.2 §3.2
+// projection of cache hit rates + semantic threshold + similarity
+// bucket distribution. Cached at the collector layer (5s).
+func adminStatsCacheHandler(stats *observability.CacheStatsCollector, logger *zap.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		reqID := middleware.RequestIDFrom(r.Context())
+		out, err := stats.Stats()
+		if err != nil {
+			logger.Error("admin cache stats failed",
+				zap.String("req_id", reqID), zap.Error(err))
+			writeError(w, mappedError{
+				Status: http.StatusInternalServerError, Type: "internal_error",
+				Message: "Failed to compute cache stats",
+			}, reqID)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(out)
+	}
+}
+
 // adminStatsTimeseriesHandler returns 60 chronological one-minute
 // points ending at the current minute. v0.1 only supports
 // metric=qps; query-string parsing is permissive (extra params

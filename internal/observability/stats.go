@@ -2,6 +2,7 @@ package observability
 
 import (
 	"errors"
+	"sort"
 	"sync"
 	"time"
 
@@ -17,15 +18,40 @@ import (
 // Window / Since fields together let the WebUI display "totals since
 // 04-29 08:00" instead of misleading "today" copy.
 type StatsSummary struct {
-	Window            string    `json:"window"`
-	Since             time.Time `json:"since"`
-	AsOf              time.Time `json:"as_of"`
-	RequestsTotal     uint64    `json:"requests_total"`
-	Errors4xx         uint64    `json:"errors_4xx"`
-	Errors5xx         uint64    `json:"errors_5xx"`
-	CostMicroTotal    int64     `json:"cost_micro_total"`
-	P99LatencySeconds float64   `json:"p99_latency_seconds"`
+	Window            string         `json:"window"`
+	Since             time.Time      `json:"since"`
+	AsOf              time.Time      `json:"as_of"`
+	RequestsTotal     uint64         `json:"requests_total"`
+	Errors4xx         uint64         `json:"errors_4xx"`
+	Errors5xx         uint64         `json:"errors_5xx"`
+	CostMicroTotal    int64          `json:"cost_micro_total"`
+	P99LatencySeconds float64        `json:"p99_latency_seconds"`
+	// TopModels is the 10 most-used (by request count) (provider,
+	// model) pairs since process start. Sorted descending by
+	// requests; ties broken by cost. Empty until the process sees
+	// any traffic. The list is intentionally short — Grafana is
+	// where you go for cardinality > 10.
+	TopModels []ModelBreakdown `json:"top_models"`
 }
+
+// ModelBreakdown is one (provider, model) row of the dashboard's
+// per-model summary. Values are process-uptime totals, like the
+// rest of StatsSummary.
+type ModelBreakdown struct {
+	Provider         string `json:"provider"`
+	Model            string `json:"model"`
+	Requests         uint64 `json:"requests"`
+	PromptTokens     uint64 `json:"prompt_tokens"`
+	CompletionTokens uint64 `json:"completion_tokens"`
+	CostMicro        int64  `json:"cost_micro"`
+}
+
+const topModelsLimit = 10
+
+// modelKey is the per-(provider, model) accumulator key used by
+// Summary's top-models computation. Kept at package scope so the
+// topModels helper can be defined separately for testability.
+type modelKey struct{ provider, model string }
 
 // StatsCollector reads aggregated values from a Prometheus registry on
 // demand. Computed values are cached for cacheTTL to keep the admin
@@ -82,6 +108,18 @@ func (s *StatsCollector) Summary() (*StatsSummary, error) {
 		AsOf:   now,
 	}
 
+	// Per-(provider, model) accumulator for the top-models list.
+	perModel := map[modelKey]*ModelBreakdown{}
+	getOrInit := func(p, mname string) *ModelBreakdown {
+		k := modelKey{p, mname}
+		if v, ok := perModel[k]; ok {
+			return v
+		}
+		v := &ModelBreakdown{Provider: p, Model: mname}
+		perModel[k] = v
+		return v
+	}
+
 	for _, f := range families {
 		switch f.GetName() {
 		case "gateway_requests_total":
@@ -94,10 +132,32 @@ func (s *StatsCollector) Summary() (*StatsSummary, error) {
 				case "502", "503", "504", "5xx":
 					summary.Errors5xx += v
 				}
+				if p, mname := labelValue(m, "provider"), labelValue(m, "model"); p != "" || mname != "" {
+					getOrInit(p, mname).Requests += v
+				}
 			}
 		case "gateway_cost_micro_total":
 			for _, m := range f.GetMetric() {
-				summary.CostMicroTotal += int64(m.GetCounter().GetValue())
+				cost := int64(m.GetCounter().GetValue())
+				summary.CostMicroTotal += cost
+				if p, mname := labelValue(m, "provider"), labelValue(m, "model"); p != "" || mname != "" {
+					getOrInit(p, mname).CostMicro += cost
+				}
+			}
+		case "gateway_tokens_total":
+			for _, m := range f.GetMetric() {
+				v := uint64(m.GetCounter().GetValue())
+				p, mname := labelValue(m, "provider"), labelValue(m, "model")
+				if p == "" && mname == "" {
+					continue
+				}
+				row := getOrInit(p, mname)
+				switch labelValue(m, "type") {
+				case "prompt":
+					row.PromptTokens += v
+				case "completion":
+					row.CompletionTokens += v
+				}
 			}
 		case "gateway_request_duration_seconds":
 			// p99 is the histogram quantile across ALL labels (we
@@ -108,6 +168,7 @@ func (s *StatsCollector) Summary() (*StatsSummary, error) {
 			summary.P99LatencySeconds = histogramQuantile(0.99, merged)
 		}
 	}
+	summary.TopModels = topModels(perModel)
 
 	s.mu.Lock()
 	cp := summary
@@ -122,8 +183,15 @@ func (s *StatsCollector) Summary() (*StatsSummary, error) {
 // the value into neither bucket, which is correct (we don't know
 // what to count it as).
 func statusLabelFromMetric(m *dto.Metric) string {
+	return labelValue(m, "status")
+}
+
+// labelValue returns the value of `name` on m, or "" if absent.
+// Generic accessor reused by cache_stats.go and elsewhere — beats
+// per-label one-off helpers.
+func labelValue(m *dto.Metric, name string) string {
 	for _, lp := range m.GetLabel() {
-		if lp.GetName() == "status" {
+		if lp.GetName() == name {
 			return lp.GetValue()
 		}
 	}
@@ -209,4 +277,28 @@ func histogramQuantile(q float64, h mergedHistogram) float64 {
 	// Above all buckets — return the highest upper bound (+Inf is
 	// usually the last bucket, in which case 0 falls out implicitly).
 	return h.buckets[len(h.buckets)-1].upper
+}
+
+// topModels returns the breakdown rows sorted by request count
+// descending (cost is the tie-breaker). Capped at topModelsLimit so
+// the WebUI table stays readable; for higher cardinality go look
+// at Grafana.
+func topModels(perModel map[modelKey]*ModelBreakdown) []ModelBreakdown {
+	if len(perModel) == 0 {
+		return nil
+	}
+	out := make([]ModelBreakdown, 0, len(perModel))
+	for _, v := range perModel {
+		out = append(out, *v)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Requests != out[j].Requests {
+			return out[i].Requests > out[j].Requests
+		}
+		return out[i].CostMicro > out[j].CostMicro
+	})
+	if len(out) > topModelsLimit {
+		out = out[:topModelsLimit]
+	}
+	return out
 }

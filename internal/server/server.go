@@ -15,9 +15,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 
+	"github.com/An-idd/x-beacon/internal/audit"
 	"github.com/An-idd/x-beacon/internal/auth"
 	"github.com/An-idd/x-beacon/internal/billing"
 	"github.com/An-idd/x-beacon/internal/cache"
+	"github.com/An-idd/x-beacon/internal/config"
 	"github.com/An-idd/x-beacon/internal/observability"
 	"github.com/An-idd/x-beacon/internal/prompt"
 	"github.com/An-idd/x-beacon/internal/provider/registry"
@@ -86,6 +88,24 @@ type Deps struct {
 	// the same registry that serves /metrics; cached at the
 	// collector layer.
 	Stats *observability.StatsCollector
+
+	// CacheStats backs /admin/stats/cache (v0.2 §3.2). Optional —
+	// nil disables the endpoint without affecting the rest of the
+	// admin surface.
+	CacheStats *observability.CacheStatsCollector
+
+	// RateLimitRules is the parsed YAML form of `rate_limits:` from
+	// config.yaml. Threaded through (rather than reaching into the
+	// live ratelimit.Multi) so the WebUI sees the operator's
+	// declared spec — algorithm, rate, key_by — without us
+	// reverse-engineering it from the live limiters.
+	RateLimitRules []config.RateLimitRule
+
+	// Audit records mutating admin actions (key create/revoke,
+	// pricing upsert/delete). Defaults to audit.Nop() when nil so
+	// admin handlers can call without nil checks; production wires
+	// audit.NewPostgres(pool).
+	Audit audit.Recorder
 
 	// Metrics is the gateway-specific Prometheus metric bundle (Week
 	// 8). Optional; nil-safe helpers everywhere so dev-mode without a
@@ -173,6 +193,9 @@ func New(deps Deps) (*Server, error) {
 	if deps.ServiceName == "" {
 		deps.ServiceName = "x-beacon"
 	}
+	if deps.Audit == nil {
+		deps.Audit = audit.Nop()
+	}
 
 	r := chi.NewRouter()
 
@@ -230,7 +253,7 @@ func New(deps Deps) (*Server, error) {
 				adm.Route("/pricing", func(p chi.Router) {
 					p.Use(middleware.Auth(deps.Authn, deps.Logger))
 					p.Use(middleware.RequireScope("admin", "pricing", deps.Logger))
-					p.Mount("/", adminPricingHandlers(deps.Pricing, deps.Logger))
+					p.Mount("/", adminPricingHandlers(deps.Pricing, deps.Audit, deps.Logger))
 				})
 			}
 
@@ -238,9 +261,15 @@ func New(deps Deps) (*Server, error) {
 				adm.Route("/keys", func(k chi.Router) {
 					k.Use(middleware.Auth(deps.Authn, deps.Logger))
 					k.Use(middleware.RequireScope("admin", "webui", deps.Logger))
-					k.Mount("/", adminKeysHandlers(deps.Keystore, deps.Logger))
+					k.Mount("/", adminKeysHandlers(deps.Keystore, deps.Audit, deps.Logger))
 				})
 			}
+
+			adm.Route("/audit", func(a chi.Router) {
+				a.Use(middleware.Auth(deps.Authn, deps.Logger))
+				a.Use(middleware.RequireScope("admin", "webui", deps.Logger))
+				a.Get("/", adminAuditHandler(deps.Audit, deps.Logger))
+			})
 
 			if deps.StoragePool != nil {
 				adm.Route("/logs", func(l chi.Router) {
@@ -256,8 +285,20 @@ func New(deps Deps) (*Server, error) {
 					s.Use(middleware.RequireScope("admin", "webui", deps.Logger))
 					s.Get("/summary", adminStatsSummaryHandler(deps.Stats, deps.Logger))
 					s.Get("/timeseries", adminStatsTimeseriesHandler(deps.Metrics.TimeSeries()))
+					if deps.CacheStats != nil {
+						s.Get("/cache", adminStatsCacheHandler(deps.CacheStats, deps.Logger))
+					}
 				})
 			}
+
+			// /admin/me: principal info for the WebUI header. Auth-only,
+			// no scope guard — any authenticated key may see its own
+			// info. Lightweight enough that the WebUI re-fetches per
+			// page navigation.
+			adm.Route("/me", func(me chi.Router) {
+				me.Use(middleware.Auth(deps.Authn, deps.Logger))
+				me.Get("/", adminMeHandler())
+			})
 
 			// /admin/routing/rules: read-only view of active classifier
 			// rules + per-rule hit counts. Mounted whenever auth is
@@ -268,6 +309,25 @@ func New(deps Deps) (*Server, error) {
 				rt.Use(middleware.Auth(deps.Authn, deps.Logger))
 				rt.Use(middleware.RequireScope("admin", "webui", deps.Logger))
 				rt.Get("/rules", adminRoutingRulesHandler(deps.Classifier, deps.MetricsReg, deps.Logger))
+			})
+
+			// /admin/providers: read-only catalog joining registry +
+			// breaker state + failover counters. Always mounted (the
+			// registry is always present); runtime-health columns
+			// degrade to "unknown"/0 when no metrics registry is
+			// available.
+			adm.Route("/providers", func(p chi.Router) {
+				p.Use(middleware.Auth(deps.Authn, deps.Logger))
+				p.Use(middleware.RequireScope("admin", "webui", deps.Logger))
+				p.Get("/", adminProvidersHandler(deps.Registry, deps.MetricsReg, deps.Logger))
+			})
+
+			// /admin/ratelimit/rules: read-only view of configured
+			// rules + reject counts. Mirrors /admin/routing/rules.
+			adm.Route("/ratelimit", func(rl chi.Router) {
+				rl.Use(middleware.Auth(deps.Authn, deps.Logger))
+				rl.Use(middleware.RequireScope("admin", "webui", deps.Logger))
+				rl.Get("/rules", adminRateLimitRulesHandler(deps.RateLimitRules, deps.MetricsReg, deps.Logger))
 			})
 		})
 	}

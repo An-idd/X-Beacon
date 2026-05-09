@@ -249,6 +249,54 @@ SELECT billing_create_partition_for_date(now() + interval '1 month');
 
 ---
 
+## 5.4 审计日志（admin_audit_logs）
+
+**模块**：`internal/audit`，表 `admin_audit_logs`（migration 000004）。
+
+### 5.4.1 现在记录哪些 action
+
+| Action | 触发点 | metadata 内容 |
+|--------|-------|---------------|
+| `key.create` | POST `/admin/keys` 200 | `{label, scopes[]}` |
+| `key.revoke` | POST `/admin/keys/{id}/revoke` 200 | `{label}` |
+| `pricing.upsert` | PUT `/admin/pricing/{model}` 200 | `{currency, input_per_1k_micro, output_per_1k_micro}` |
+| `pricing.delete` | DELETE `/admin/pricing/{model}` 204 | `null` |
+
+**严格不记录**：prompt / response 内容（schema 也没有这些字段）。
+
+### 5.4.2 加新 action
+
+```go
+// 1. 加常量
+const ActionRoutingReload audit.Action = "routing.reload"
+
+// 2. handler 内调用
+recordAudit(r.Context(), recorder, r, audit.ActionRoutingReload,
+    "routing_config", "global", map[string]any{...}, logger)
+```
+
+无需新 migration（`action` 字段是文本，CHECK 只要求 `category.verb` 形态）。
+
+### 5.4.3 查询
+
+通过 WebUI `/audit` 页（默认 7 天，可调到 31 天上限），或直接 SQL：
+
+```sql
+-- 找谁在过去 24h revoke 过 key
+SELECT actor_label, occurred_at, target_id, metadata
+  FROM admin_audit_logs
+ WHERE action = 'key.revoke'
+   AND occurred_at >= now() - interval '24 hours'
+ ORDER BY occurred_at DESC;
+```
+
+### 5.4.4 保留期
+
+v0.1 不主动清理。表是 BIGSERIAL，索引按时间，单年增长 ≤ 100MB（操作量 < 1000/day）即使在大团队也撑得住。
+v0.2 加 retention 策略（建议 90d 滚动 DELETE，30 min batch）。
+
+---
+
 ## 6. 健康检查与 readiness
 
 - `/healthz` — 进程活着即返回 200。**不要**用作 LB 探针，否则 DB 挂掉时仍会派流量。

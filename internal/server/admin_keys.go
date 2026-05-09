@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 
+	"github.com/An-idd/x-beacon/internal/audit"
 	"github.com/An-idd/x-beacon/internal/auth"
 	"github.com/An-idd/x-beacon/internal/server/middleware"
 )
@@ -24,11 +25,11 @@ import (
 // All routes are gated by RequireScope("admin","webui") at mount time,
 // so handlers may assume an authenticated, authorized Principal on
 // the request context.
-func adminKeysHandlers(ks *auth.Keystore, logger *zap.Logger) chi.Router {
+func adminKeysHandlers(ks *auth.Keystore, recorder audit.Recorder, logger *zap.Logger) chi.Router {
 	r := chi.NewRouter()
 	r.Get("/", listKeysHandler(ks, logger))
-	r.Post("/", createKeyHandler(ks, logger))
-	r.Post("/{id}/revoke", revokeKeyHandler(ks, logger))
+	r.Post("/", createKeyHandler(ks, recorder, logger))
+	r.Post("/{id}/revoke", revokeKeyHandler(ks, recorder, logger))
 	return r
 }
 
@@ -184,7 +185,7 @@ type createKeyResponse struct {
 	Warning string `json:"warning"`
 }
 
-func createKeyHandler(ks *auth.Keystore, logger *zap.Logger) http.HandlerFunc {
+func createKeyHandler(ks *auth.Keystore, recorder audit.Recorder, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reqID := middleware.RequestIDFrom(r.Context())
 
@@ -252,13 +253,18 @@ func createKeyHandler(ks *auth.Keystore, logger *zap.Logger) http.HandlerFunc {
 			Key:     secret,
 			Warning: "Store this key now. It is shown only once and cannot be recovered later.",
 		}
+		recordAudit(r.Context(), recorder, r, audit.ActionKeyCreate, "api_key", rec.ID,
+			map[string]any{
+				"label":  rec.Name,
+				"scopes": flattenScopes(rec.Scopes),
+			}, logger)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(resp)
 	}
 }
 
-func revokeKeyHandler(ks *auth.Keystore, logger *zap.Logger) http.HandlerFunc {
+func revokeKeyHandler(ks *auth.Keystore, recorder audit.Recorder, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reqID := middleware.RequestIDFrom(r.Context())
 		id := chi.URLParam(r, "id")
@@ -288,6 +294,8 @@ func revokeKeyHandler(ks *auth.Keystore, logger *zap.Logger) http.HandlerFunc {
 			return
 		}
 
+		recordAudit(r.Context(), recorder, r, audit.ActionKeyRevoke, "api_key", rec.ID,
+			map[string]any{"label": rec.Name}, logger)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(dtoFromRecord(rec))
 	}

@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 
+	"github.com/An-idd/x-beacon/internal/audit"
 	"github.com/An-idd/x-beacon/internal/billing"
 	"github.com/An-idd/x-beacon/internal/server/middleware"
 )
@@ -21,12 +22,12 @@ import (
 // the in-memory snapshot atomically. Single-instance deployments are
 // fully synchronous; multi-instance ones get bottom-line consistency
 // from the periodic reload (default 30 min).
-func adminPricingHandlers(cache *billing.PricingCache, logger *zap.Logger) chi.Router {
+func adminPricingHandlers(cache *billing.PricingCache, recorder audit.Recorder, logger *zap.Logger) chi.Router {
 	r := chi.NewRouter()
 	r.Get("/", listPricing(cache))
 	r.Get("/{model}", getPricing(cache))
-	r.Put("/{model}", upsertPricing(cache, logger))
-	r.Delete("/{model}", deletePricing(cache, logger))
+	r.Put("/{model}", upsertPricing(cache, recorder, logger))
+	r.Delete("/{model}", deletePricing(cache, recorder, logger))
 	return r
 }
 
@@ -103,7 +104,7 @@ type pricingWriteRequest struct {
 	OutputPer1kMicro *int64  `json:"output_per_1k_micro"`
 }
 
-func upsertPricing(cache *billing.PricingCache, logger *zap.Logger) http.HandlerFunc {
+func upsertPricing(cache *billing.PricingCache, recorder audit.Recorder, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reqID := middleware.RequestIDFrom(r.Context())
 		model := chi.URLParam(r, "model")
@@ -164,13 +165,20 @@ func upsertPricing(cache *billing.PricingCache, logger *zap.Logger) http.Handler
 			zap.Int64("input_per_1k_micro", stored.InputPer1kMicro),
 			zap.Int64("output_per_1k_micro", stored.OutputPer1kMicro))
 
+		recordAudit(r.Context(), recorder, r, audit.ActionPricingUpsert, "pricing_rule", model,
+			map[string]any{
+				"currency":             stored.Currency,
+				"input_per_1k_micro":   stored.InputPer1kMicro,
+				"output_per_1k_micro":  stored.OutputPer1kMicro,
+			}, logger)
+
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(dtoFromRate(stored))
 	}
 }
 
-func deletePricing(cache *billing.PricingCache, logger *zap.Logger) http.HandlerFunc {
+func deletePricing(cache *billing.PricingCache, recorder audit.Recorder, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reqID := middleware.RequestIDFrom(r.Context())
 		model := chi.URLParam(r, "model")
@@ -197,6 +205,7 @@ func deletePricing(cache *billing.PricingCache, logger *zap.Logger) http.Handler
 		logger.Info("pricing deleted",
 			zap.String("req_id", reqID),
 			zap.String("model", model))
+		recordAudit(r.Context(), recorder, r, audit.ActionPricingDelete, "pricing_rule", model, nil, logger)
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
