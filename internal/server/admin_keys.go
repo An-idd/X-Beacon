@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -33,34 +35,77 @@ func adminKeysHandlers(ks *auth.Keystore, logger *zap.Logger) chi.Router {
 // keyDTO is the on-the-wire projection. The plaintext secret is NEVER
 // on this struct; it appears only in createKeyResponse and only on the
 // initial POST response.
+//
+// Wire shape diverges from the internal KeyRecord on two axes (per
+// docs/webui-requirements.md §5.2 contract for the WebUI):
+//
+//   - `name` (DB / internal) → `label` (wire) — UI vocabulary.
+//   - scopes `map[category][]value` → flat `["category:value"]` slice
+//     — admins type/select scope tuples; the UI doesn't need to deal
+//     with the JSONB nested shape.
+//
+// HashHexShort is preserved (admin-only debug surface).
 type keyDTO struct {
-	ID           string              `json:"id"`
-	IDPreview    string              `json:"id_preview"`
-	Name         string              `json:"name"`
-	HashHexShort string              `json:"hash_hex_short"`
-	Scopes       map[string][]string `json:"scopes"`
-	CreatedAt    time.Time           `json:"created_at"`
-	LastUsedAt   *time.Time          `json:"last_used_at,omitempty"`
-	RevokedAt    *time.Time          `json:"revoked_at,omitempty"`
+	ID           string     `json:"id"`
+	IDPreview    string     `json:"id_preview"`
+	Label        string     `json:"label"`
+	HashHexShort string     `json:"hash_hex_short"`
+	Scopes       []string   `json:"scopes"`
+	CreatedAt    time.Time  `json:"created_at"`
+	LastUsedAt   *time.Time `json:"last_used_at,omitempty"`
+	RevokedAt    *time.Time `json:"revoked_at,omitempty"`
 }
 
 func dtoFromRecord(r auth.KeyRecord) keyDTO {
-	scopes := r.Scopes
-	if scopes == nil {
-		// Force a JSON object, not null, so the client side can do
-		// `dto.scopes[cat]` without a presence check.
-		scopes = map[string][]string{}
-	}
 	return keyDTO{
 		ID:           r.ID,
 		IDPreview:    r.IDPreview,
-		Name:         r.Name,
+		Label:        r.Name,
 		HashHexShort: r.HashHexShort,
-		Scopes:       scopes,
+		Scopes:       flattenScopes(r.Scopes),
 		CreatedAt:    r.CreatedAt,
 		LastUsedAt:   r.LastUsedAt,
 		RevokedAt:    r.RevokedAt,
 	}
+}
+
+// flattenScopes turns the JSONB nested map into a sorted flat slice
+// of `category:value` tuples. Sorted so list responses are stable
+// across calls (tests + cache friendliness). Always returns a non-nil
+// slice so JSON encodes as `[]` not `null` — the WebUI can `.length`
+// without a presence check.
+func flattenScopes(m map[string][]string) []string {
+	out := []string{}
+	for cat, vals := range m {
+		for _, v := range vals {
+			out = append(out, cat+":"+v)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// expandScopes is the inverse: parse flat `["admin:webui", ...]`
+// from the request body into the nested map keystore.Create expects.
+// Errors on missing colon, empty side, or duplicate tuples — the
+// HTTP-side validator (auth.scopePattern) catches format issues
+// further down, but we want fast 400s on malformed input.
+func expandScopes(flat []string) (map[string][]string, error) {
+	out := make(map[string][]string)
+	seen := make(map[string]struct{}, len(flat))
+	for _, tuple := range flat {
+		idx := strings.IndexByte(tuple, ':')
+		if idx <= 0 || idx == len(tuple)-1 {
+			return nil, errors.New("scope " + tuple + " must be in `category:value` form")
+		}
+		if _, dup := seen[tuple]; dup {
+			continue
+		}
+		seen[tuple] = struct{}{}
+		cat, val := tuple[:idx], tuple[idx+1:]
+		out[cat] = append(out[cat], val)
+	}
+	return out, nil
 }
 
 func listKeysHandler(ks *auth.Keystore, logger *zap.Logger) http.HandlerFunc {
@@ -120,20 +165,22 @@ func listKeysHandler(ks *auth.Keystore, logger *zap.Logger) http.HandlerFunc {
 	}
 }
 
-// createKeyRequest is the inbound POST body. Scopes uses the JSONB
-// shape on api_keys.scopes — `{"category": ["value", ...]}` — so we
-// don't translate at the API boundary.
+// createKeyRequest is the inbound POST body. Wire shape mirrors the
+// projection: `label` (not `name`) and a flat `["category:value"]`
+// scope slice. Translation to the internal nested map happens in
+// the handler via expandScopes.
 type createKeyRequest struct {
-	Name   string              `json:"name"`
-	Scopes map[string][]string `json:"scopes"`
+	Label  string   `json:"label"`
+	Scopes []string `json:"scopes"`
 }
 
 // createKeyResponse is the one-shot return path for a freshly-created
-// key. Secret appears here and nowhere else; document loudly that
-// clients must persist it before disposing of the response.
+// key. The plaintext key appears here and nowhere else; document
+// loudly that clients must persist it before disposing of the
+// response.
 type createKeyResponse struct {
 	keyDTO
-	Secret  string `json:"secret"`
+	Key     string `json:"key"`
 	Warning string `json:"warning"`
 }
 
@@ -149,10 +196,10 @@ func createKeyHandler(ks *auth.Keystore, logger *zap.Logger) http.HandlerFunc {
 			}, reqID)
 			return
 		}
-		if body.Name == "" {
+		if body.Label == "" {
 			writeError(w, mappedError{
 				Status: http.StatusBadRequest, Type: "invalid_request_error",
-				Code: "missing_name", Message: "Field 'name' is required",
+				Code: "missing_label", Message: "Field 'label' is required",
 			}, reqID)
 			return
 		}
@@ -164,7 +211,16 @@ func createKeyHandler(ks *auth.Keystore, logger *zap.Logger) http.HandlerFunc {
 			return
 		}
 
-		rec, secret, err := ks.Create(r.Context(), body.Name, body.Scopes)
+		scopes, expandErr := expandScopes(body.Scopes)
+		if expandErr != nil {
+			writeError(w, mappedError{
+				Status: http.StatusBadRequest, Type: "invalid_request_error",
+				Code: "invalid_scopes", Message: expandErr.Error(),
+			}, reqID)
+			return
+		}
+
+		rec, secret, err := ks.Create(r.Context(), body.Label, scopes)
 		if err != nil {
 			// Validation-shaped errors come back as plain `errors.New`;
 			// surface them as 400 with the message verbatim so the
@@ -193,8 +249,8 @@ func createKeyHandler(ks *auth.Keystore, logger *zap.Logger) http.HandlerFunc {
 
 		resp := createKeyResponse{
 			keyDTO:  dtoFromRecord(rec),
-			Secret:  secret,
-			Warning: "Store this secret now. It is shown only once and cannot be recovered later.",
+			Key:     secret,
+			Warning: "Store this key now. It is shown only once and cannot be recovered later.",
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)

@@ -94,10 +94,11 @@ func TestAdminKeys_CreateRejectsBadInput(t *testing.T) {
 	f := newKeysFixture(t)
 
 	cases := map[string][]byte{
-		"missing name":       []byte(`{"scopes":{"admin":["webui"]}}`),
-		"missing scopes":     []byte(`{"name":"foo"}`),
-		"empty scopes map":   []byte(`{"name":"foo","scopes":{}}`),
+		"missing label":      []byte(`{"scopes":["admin:webui"]}`),
+		"missing scopes":     []byte(`{"label":"foo"}`),
+		"empty scopes array": []byte(`{"label":"foo","scopes":[]}`),
 		"malformed json":     []byte(`not json`),
+		"scope no colon":     []byte(`{"label":"foo","scopes":["adminwebui"]}`),
 	}
 	for label, body := range cases {
 		t.Run(label, func(t *testing.T) {
@@ -109,7 +110,7 @@ func TestAdminKeys_CreateRejectsBadInput(t *testing.T) {
 
 func TestAdminKeys_CreateRejectsBadScopeFormat(t *testing.T) {
 	f := newKeysFixture(t)
-	body := []byte(`{"name":"bad","scopes":{"Admin":["WebUI"]}}`)
+	body := []byte(`{"label":"bad","scopes":["Admin:WebUI"]}`)
 	rec := f.do(t, "POST", "/admin/keys", body, f.adminKey)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "invalid")
@@ -121,13 +122,13 @@ func TestAdminKeys_CreateUseRevoke401Cycle(t *testing.T) {
 	f := newKeysFixture(t)
 
 	// 1. Create.
-	body := []byte(`{"name":"e2e-test","scopes":{"admin":["webui"]}}`)
+	body := []byte(`{"label":"e2e-test","scopes":["admin:webui"]}`)
 	rec := f.do(t, "POST", "/admin/keys", body, f.adminKey)
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 	var created map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
 	newID, _ := created["id"].(string)
-	newSecret, _ := created["secret"].(string)
+	newSecret, _ := created["key"].(string)
 	require.NotEmpty(t, newID)
 	require.NotEmpty(t, newSecret)
 
