@@ -258,6 +258,17 @@ func New(deps Deps) (*Server, error) {
 					s.Get("/timeseries", adminStatsTimeseriesHandler(deps.Metrics.TimeSeries()))
 				})
 			}
+
+			// /admin/routing/rules: read-only view of active classifier
+			// rules + per-rule hit counts. Mounted whenever auth is
+			// configured — classifier may be nil (smart routing
+			// disabled), in which case the handler reports
+			// `enabled: false`.
+			adm.Route("/routing", func(rt chi.Router) {
+				rt.Use(middleware.Auth(deps.Authn, deps.Logger))
+				rt.Use(middleware.RequireScope("admin", "webui", deps.Logger))
+				rt.Get("/rules", adminRoutingRulesHandler(deps.Classifier, deps.MetricsReg, deps.Logger))
+			})
 		})
 	}
 
