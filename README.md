@@ -5,8 +5,6 @@
 **高性能、可扩展的 LLM 推理网关**
 
 为使用多家 LLM 服务的团队提供统一接入层，解决成本、可靠性、可观测性三大痛点。
-
-[![Build Status](https://img.shields.io/github/actions/workflow/status/An-idd/x-beacon/ci.yml?branch=main)](https://github.com/An-idd/x-beacon/actions)
 [![Go Report Card](https://goreportcard.com/badge/github.com/An-idd/x-beacon)](https://goreportcard.com/report/github.com/An-idd/x-beacon)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/go-1.22%2B-00ADD8.svg)](https://golang.org)
@@ -75,7 +73,7 @@ docker-compose up -d
 服务启动后访问：
 
 - 网关 API：`http://localhost:8080`
-- 管理面板：`http://localhost:8080/admin`
+- 管理面板：见 [X-Beacon-Web](https://github.com/An-idd/X-Beacon-Web)（独立仓库，Vue 3 + Arco）
 - Prometheus 指标：`http://localhost:8080/metrics`
 
 ### 发送第一个请求
@@ -147,12 +145,46 @@ curl -s localhost:8080/readyz | jq .
 
 `xbctl` 子命令速查：
 
-| 子命令 | 用途 |
-|--------|------|
-| `xbctl migrate up\|down\|version` | schema 管理 |
-| `xbctl keygen -name <label>` | 生成新 key（secret 仅打印一次） |
-| `xbctl keylist [-all] [-json]` | 查看 key 列表 |
-| `xbctl keyrevoke -id <id>` | 撤销 key（cache 最多 60s 内仍可能放行） |
+
+| 子命令                          | 用途                                    |
+| ------------------------------- | --------------------------------------- |
+| `xbctl migrate up|down|version` | schema 管理                             |
+| `xbctl keygen -name <label>`    | 生成新 key（secret 仅打印一次）         |
+| `xbctl keylist [-all] [-json]`  | 查看 key 列表                           |
+| `xbctl keyrevoke -id <id>`      | 撤销 key（cache 最多 60s 内仍可能放行） |
+
+### WebUI 本地联调（Week 13 加入）
+
+`scripts/devup-webui.sh` 一键拉起后端 + mock upstream + 种子流量，专为
+[X-Beacon-Web](https://github.com/An-idd/X-Beacon-Web) 前端联调准备：
+
+```bash
+scripts/devup-webui.sh           # 启动 docker、迁移、网关、mock、签发 admin key、灌入种子流量
+scripts/devup-webui.sh stop      # 停掉 gateway + mockupstream（docker 保留）
+```
+
+脚本会按顺序完成：
+
+1. `make docker-up` 启 Postgres + Redis-Stack，等端口就绪
+2. `make build` 编译 `bin/x-beacon` + `bin/xbctl`
+3. `xbctl migrate up` 应用 schema
+4. 缺失时从 `configs/config.example.yaml` bootstrap `configs/config.yaml`，并写一份
+   指向本地 mock upstream 的 `configs/providers.yaml`
+5. 起 `scripts/mockupstream`（默认 `127.0.0.1:9091`）与 gateway（默认 `127.0.0.1:8080`）
+6. `xbctl keygen` 签发一把带 `admin:webui` + `admin:pricing` scope 的 admin key
+7. 灌 50 个成功 + 5 个 401 请求，让 Dashboard / Logs 页面有数据
+
+运行结束后终端会打印 admin key 与快速校验命令，然后切到前端仓库 `npm run dev` 即可：
+
+```bash
+curl http://127.0.0.1:8080/healthz
+curl -H "Authorization: Bearer <admin key>" http://127.0.0.1:8080/admin/stats/summary
+```
+
+可调环境变量：`DSN`、`GATEWAY_ADDR`、`MOCK_ADDR`、`TRAFFIC_OK`、`TRAFFIC_ERR`。
+日志落在 `/tmp/xbeacon-devup/`。脚本**幂等**：重复执行会重启 gateway 以清掉熔断器
+latched 状态，并以 unix 时间戳后缀生成新 key（旧 key 不自动清，按需
+`xbctl keyrevoke`）。
 
 详细部署说明见 [部署文档](docs/deployment.md)。
 
@@ -239,9 +271,14 @@ curl -s localhost:8080/readyz | jq .
 - [X]  智能路由（规则引擎：token 数 + 关键词，A/B opt-out via scope）
 - [X]  Prompt 优化（system 永留 + 滑动窗口 + token 预算）
 
-### 📋 计划中（v0.4+）
+### 🚧 进行中（v0.4 - 管理面板）
 
-- [ ]  管理面板（Web UI）
+- [X]  Admin API：CORS + `/admin/keys` + `/admin/logs` + `/admin/stats/{summary,timeseries}`
+- [X]  只读端点：`/admin/routing/rules` / `/admin/providers` / `/admin/ratelimit/rules` / `/admin/cache/stats`
+- [X]  审计日志（`admin_audit_logs`：key/pricing 变更，scope `admin:webui` 守门）
+- [X]  Dashboard top-models 聚合
+- [X]  WebUI v0.2（[X-Beacon-Web](https://github.com/An-idd/X-Beacon-Web)：Vue 3 + Arco + TanStack Query，9 个页面）
+- [ ]  WebUI 写功能完善（限流规则编辑、provider 健康操作）
 - [ ]  多租户隔离
 
 ### 💭 探索中
@@ -258,7 +295,6 @@ curl -s localhost:8080/readyz | jq .
 - [运维手册](docs/runbook.md) - cache / 路由 / 压缩 / billing 常见运维动作
 - [部署指南](docs/deployment.md) - 生产环境部署最佳实践
 - [配置参考](docs/configuration.md) - 所有配置项说明
-- [贡献指南](CONTRIBUTING.md) - 如何参与贡献
 
 ## 技术栈
 
@@ -277,12 +313,6 @@ curl -s localhost:8080/readyz | jq .
 
 选择 X-BEACON 的理由：更好的性能、更强的生产就绪度、独有的语义缓存能力。详细对比见 [architecture.md](docs/architecture.md#与同类项目对比)。
 
-## 贡献
-
-欢迎 PR！请先阅读 [贡献指南](CONTRIBUTING.md)。
-
-遇到问题请在 [Issues](https://github.com/An-idd/x-beacon/issues) 反馈，或加入我们的 [Discord](#) 社区讨论。
-
 ## 协议
 
 本项目基于 [Apache License 2.0](LICENSE) 开源。
@@ -291,7 +321,6 @@ curl -s localhost:8080/readyz | jq .
 
 - 感谢 [LiteLLM](https://github.com/BerriAI/litellm) 项目在 provider 抽象设计上的启发
 - 感谢 [Envoy](https://github.com/envoyproxy/envoy) 的网关架构设计思想
-- 感谢所有贡献者
 
 ---
 
