@@ -11,6 +11,8 @@
 
 [快速开始](#快速开始) · [核心特性](#核心特性) · [架构设计](docs/architecture.md) · [性能基准](docs/benchmarks.md) · [路线图](#路线图)
 
+[English README](README.en.md)
+
 </div>
 
 ---
