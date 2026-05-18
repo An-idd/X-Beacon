@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync/atomic"
 	"time"
 )
 
@@ -39,8 +40,23 @@ type readyzCheckBody struct {
 // timeout and writes a 200 only when all are OK. Empty checker slice
 // returns 200 (the gateway has nothing to verify; the caller is asking
 // "are you up?", and the answer is yes).
-func readyzHandler(checkers []ReadinessChecker) http.HandlerFunc {
+//
+// When draining is non-nil and set, the handler short-circuits to 503
+// without running checkers. This lets a front load balancer notice the
+// pod is going away (via its readiness probe) and stop dispatching new
+// requests before httpSrv.Shutdown begins draining in-flight ones.
+func readyzHandler(checkers []ReadinessChecker, draining *atomic.Bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if draining != nil && draining.Load() {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(readyzResponse{
+				Ready:  false,
+				Checks: map[string]readyzCheckBody{"draining": {OK: false, Error: "server is shutting down"}},
+			})
+			return
+		}
+
 		ctx, cancel := context.WithTimeout(r.Context(), readinessTimeout)
 		defer cancel()
 

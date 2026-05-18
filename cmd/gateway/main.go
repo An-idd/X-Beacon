@@ -227,6 +227,22 @@ func runWithCtx(ctx context.Context, args []string, stdout *os.File) error {
 		logger.Info("shutdown signal received")
 	}
 
+	// Flip /readyz to 503 first so any front load balancer stops sending
+	// new traffic; then sleep one LB-readiness-probe period before
+	// draining in-flight requests. Skipped when delay is 0 (single-node
+	// deployments without an LB).
+	srv.StartDraining()
+	if d := cfg.Server.PreShutdownDelay; d > 0 {
+		logger.Info("draining: /readyz now reports 503",
+			zap.Duration("pre_shutdown_delay", d))
+		select {
+		case <-time.After(d):
+		case <-time.After(cfg.Server.ShutdownTimeout):
+			// Defensive: never let pre-shutdown delay exceed the overall
+			// shutdown budget; a misconfig shouldn't keep us hanging.
+		}
+	}
+
 	sctx, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
 	defer cancel()
 	if err := httpSrv.Shutdown(sctx); err != nil {

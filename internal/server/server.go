@@ -8,6 +8,7 @@ package server
 
 import (
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -168,8 +169,23 @@ type Deps struct {
 // Server holds the assembled router. Constructed once at startup; safe for
 // concurrent use under http.Server.
 type Server struct {
-	router chi.Router
-	deps   Deps
+	router   chi.Router
+	deps     Deps
+	draining atomic.Bool
+}
+
+// StartDraining flips /readyz to 503 so a front load balancer can stop
+// dispatching new traffic before httpSrv.Shutdown begins. Idempotent.
+// Always returns immediately — the caller is responsible for sleeping
+// long enough for the LB's next readiness probe to observe the change.
+func (s *Server) StartDraining() {
+	s.draining.Store(true)
+}
+
+// IsDraining reports the current drain state. Mainly for tests and
+// /healthz-adjacent introspection.
+func (s *Server) IsDraining() bool {
+	return s.draining.Load()
 }
 
 // New validates Deps and constructs the router with all routes mounted.
@@ -177,6 +193,7 @@ type Server struct {
 // later steps; for now the route surface matches Week 1 (/healthz,
 // /v1/models, /metrics).
 func New(deps Deps) (*Server, error) {
+	s := &Server{}
 	if deps.Logger == nil {
 		return nil, errMissingDep("Logger")
 	}
@@ -216,7 +233,7 @@ func New(deps Deps) (*Server, error) {
 	// downstream dependencies (DB, Redis) and refuses traffic when they
 	// are unavailable.
 	r.Get("/healthz", healthzHandler())
-	r.Get("/readyz", readyzHandler(deps.ReadinessCheckers))
+	r.Get("/readyz", readyzHandler(deps.ReadinessCheckers, &s.draining))
 
 	// /v1/* lives on a subrouter so Auth can attach without leaking onto
 	// /healthz or /metrics. Auth is mounted only when Authn is configured;
@@ -339,7 +356,9 @@ func New(deps Deps) (*Server, error) {
 		))
 	}
 
-	return &Server{router: r, deps: deps}, nil
+	s.router = r
+	s.deps = deps
+	return s, nil
 }
 
 // Handler returns the http.Handler suitable for http.Server.Handler.

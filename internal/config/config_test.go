@@ -43,7 +43,8 @@ log:
 	assert.Equal(t, ":9090", cfg.Server.Addr)
 	assert.Equal(t, 5*time.Second, cfg.Server.ReadTimeout)
 	assert.Equal(t, "debug", cfg.Log.Level)
-	assert.Equal(t, 30*time.Second, cfg.Server.ShutdownTimeout) // default
+	assert.Equal(t, 30*time.Second, cfg.Server.ShutdownTimeout)  // default
+	assert.Equal(t, 5*time.Second, cfg.Server.PreShutdownDelay) // default
 }
 
 func TestLoad_RoutingRulesParsed(t *testing.T) {

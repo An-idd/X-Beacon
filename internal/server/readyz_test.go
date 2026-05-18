@@ -97,6 +97,31 @@ func TestReadyz_TimeoutSurfacesAsCheckerError(t *testing.T) {
 	assert.Contains(t, body.Checks["slow"].Error, "context deadline exceeded")
 }
 
+func TestReadyz_Draining_ShortCircuitsTo503(t *testing.T) {
+	// Once StartDraining is called, /readyz must return 503 immediately
+	// even when all underlying checkers are healthy. This lets a front
+	// LB pull the pod out of rotation before httpSrv.Shutdown begins.
+	srv := newTestServer(t, func(d *Deps) {
+		d.ReadinessCheckers = []ReadinessChecker{okChecker("postgres"), okChecker("redis")}
+	})
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	srv.StartDraining()
+	assert.True(t, srv.IsDraining())
+
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+
+	var body readyzResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.False(t, body.Ready)
+	assert.Contains(t, body.Checks["draining"].Error, "shutting down")
+}
+
 func TestReadyz_NotInsideV1Auth(t *testing.T) {
 	// /readyz must be reachable WITHOUT a bearer token, otherwise k8s
 	// probes can't query it.

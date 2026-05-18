@@ -133,6 +133,14 @@ type ServerConfig struct {
 	WriteTimeout    time.Duration `mapstructure:"write_timeout"`
 	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout"`
 
+	// PreShutdownDelay is how long to keep serving traffic AFTER /readyz
+	// flips to 503 but BEFORE httpSrv.Shutdown is called. This gives a
+	// front load balancer (k8s Service, nginx upstream) time to observe
+	// the unready state and stop dispatching new requests. Should be at
+	// least one readiness-probe period of the LB (k8s default: 10s).
+	// Zero disables the delay (single-instance / no-LB deployments).
+	PreShutdownDelay time.Duration `mapstructure:"pre_shutdown_delay"`
+
 	// AdminCORSOrigins is the explicit allowlist for /admin/* CORS.
 	// Empty (default) = no CORS headers emitted = browsers reject any
 	// cross-origin request. Wildcards intentionally not supported;
@@ -246,6 +254,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.read_timeout", 10*time.Second)
 	v.SetDefault("server.write_timeout", 600*time.Second)
 	v.SetDefault("server.shutdown_timeout", 30*time.Second)
+	v.SetDefault("server.pre_shutdown_delay", 5*time.Second)
 
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.format", "json")
@@ -310,6 +319,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.ShutdownTimeout <= 0 {
 		errs = append(errs, errors.New("server.shutdown_timeout must be > 0"))
+	}
+	if c.Server.PreShutdownDelay < 0 {
+		errs = append(errs, errors.New("server.pre_shutdown_delay must be >= 0"))
 	}
 
 	switch strings.ToLower(c.Log.Level) {

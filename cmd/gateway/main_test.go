@@ -92,6 +92,7 @@ server:
   read_timeout: 5s
   write_timeout: 30s
   shutdown_timeout: 5s
+  pre_shutdown_delay: 0s
 log:
   level: error
   format: json
