@@ -251,7 +251,19 @@ func New(deps Deps) (*Server, error) {
 		// OpenAI-compatible model catalog. Handler tolerates an empty registry
 		// (returns {"object":"list","data":[]}) so the gateway boots even when
 		// providers.yaml is absent.
-		v1.Get("/models", modelsHandler(deps.Registry))
+		// /v1/models joins the static registry catalog with the live
+		// pricing snapshot and circuit-breaker gauges so SDKs can make
+		// price/availability decisions without a second API call. Both
+		// extra deps are optional and degrade gracefully when nil. We
+		// promote the concrete *PricingCache to the narrow interface
+		// only when non-nil, otherwise we'd hand the handler a typed-
+		// nil-inside-interface which is non-nil for `!= nil` checks
+		// and would panic on first Lookup.
+		var modelsPricing pricingLookup
+		if deps.Pricing != nil {
+			modelsPricing = deps.Pricing
+		}
+		v1.Get("/models", modelsHandler(deps.Registry, modelsPricing, deps.MetricsReg))
 		v1.Post("/chat/completions", chatCompletionsHandler(deps.Router, deps.Tokenizer, deps.Billing, deps.Metrics, deps.Cache, deps.CacheTTL, deps.Semantic, deps.Classifier, deps.Compressor, deps.Logger))
 	})
 

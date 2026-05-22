@@ -34,12 +34,59 @@ type Provider interface {
 	SupportedModels() []ModelInfo
 }
 
-// ModelInfo describes a single model served by a provider. The field names
-// mirror the OpenAI /v1/models response.
+// ModelInfo describes a single model served by a provider. The base four
+// fields (ID/Object/Created/OwnedBy) mirror the OpenAI /v1/models response
+// so existing SDKs parse the envelope unchanged. The remaining fields are
+// X-Beacon extensions populated by the /v1/models handler from the catalog,
+// pricing cache, and breaker gauges; absence is graceful via omitempty.
+//
+// Extension fields are placed at the top level (not under x_beacon:) to match
+// the convention used by OpenRouter, Together, and Groq.
 type ModelInfo struct {
-	ID       string `json:"id"`
-	Object   string `json:"object"` // always "model"
-	Created  int64  `json:"created,omitempty"`
-	OwnedBy  string `json:"owned_by,omitempty"`
+	ID      string `json:"id"`
+	Object  string `json:"object"` // always "model"
+	Created int64  `json:"created,omitempty"`
+	OwnedBy string `json:"owned_by,omitempty"`
+
+	// X-Beacon extensions. All omitempty so models without catalog entries
+	// produce an OpenAI-shape response.
+	Pricing       *ModelPricing `json:"pricing,omitempty"`
+	ContextLength int           `json:"context_length,omitempty"`
+	Capabilities  []string      `json:"capabilities,omitempty"`
+	DataPolicy    *DataPolicy   `json:"data_policy,omitempty"`
+	Status        string        `json:"status,omitempty"` // admin-scope only; "available"|"degraded"|"unavailable"
+
 	Provider string `json:"-"` // gateway-side metadata, not exposed
 }
+
+// ModelPricing is the per-1k-token unit price in human-readable string form.
+// We serialize as strings (not floats) because float JSON round-tripping can
+// turn "0.00014" into "0.00013999..." in some clients — for billing-adjacent
+// metadata this is unacceptable. Internally pricing lives as int64 micro-USD
+// (see internal/billing.Rate) and is converted at serialization time.
+type ModelPricing struct {
+	Prompt     string `json:"prompt"`     // e.g. "0.0025" — USD per 1K tokens
+	Completion string `json:"completion"` // e.g. "0.01"
+	Currency   string `json:"currency"`   // e.g. "USD"
+	Unit       string `json:"unit"`       // e.g. "1K_tokens"
+}
+
+// DataPolicy describes how the upstream provider treats request data.
+// Training: "opt_out" | "unknown" | "allowed". RetentionDays may be 0 when
+// the provider doesn't publish a fixed retention policy.
+type DataPolicy struct {
+	Training      string `json:"training"`
+	RetentionDays int    `json:"retention_days,omitempty"`
+}
+
+// Capability values used in ModelInfo.Capabilities. Free-form strings rather
+// than an enum so adding a new capability ("audio", "code_interpreter", ...)
+// is a one-line catalog edit, not a schema change.
+const (
+	CapabilityChat     = "chat"
+	CapabilityTools    = "tools"
+	CapabilityVision   = "vision"
+	CapabilityStream   = "stream"
+	CapabilityJSONMode = "json_mode"
+	CapabilityLogprobs = "logprobs"
+)
