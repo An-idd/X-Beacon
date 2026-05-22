@@ -115,8 +115,26 @@ type RouterBreakerConfig struct {
 // AuthConfig holds settings for the API-key auth path. Step 4.4 introduces
 // the Redis cache layer; future auth changes (token rotation, key types)
 // extend this struct.
+//
+// StaticKeys is an opt-in list of in-memory API keys. When present, it
+// takes precedence over Postgres-backed auth — no DB connection required.
+// Intended for compat/dev profiles where running a full PG stack just to
+// authenticate a few requests is overkill; production should use PG.
 type AuthConfig struct {
-	Cache AuthCacheConfig `mapstructure:"cache"`
+	Cache      AuthCacheConfig  `mapstructure:"cache"`
+	StaticKeys []StaticAuthKey  `mapstructure:"static_keys"`
+}
+
+// StaticAuthKey defines one in-memory API key. ID is the stable
+// identifier surfaced in metrics/logs (e.g. "compat-test"); Name is a
+// human label; Secret is the bearer token clients must send. Scopes is
+// an optional map matching the JSONB column shape used by PG-backed keys
+// (e.g. {"admin": ["webui"]}).
+type StaticAuthKey struct {
+	ID     string              `mapstructure:"id"`
+	Name   string              `mapstructure:"name"`
+	Secret string              `mapstructure:"secret"`
+	Scopes map[string][]string `mapstructure:"scopes"`
 }
 
 // AuthCacheConfig configures the Redis cache that fronts the

@@ -1,0 +1,10 @@
+data: {"id":"<ID>","object":"chat.completion.chunk","created":<TS>,"model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"<ID>","object":"chat.completion.chunk","created":<TS>,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"hello "}}]}
+
+data: {"id":"<ID>","object":"chat.completion.chunk","created":<TS>,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"world"}}]}
+
+data: {"id":"<ID>","object":"chat.completion.chunk","created":<TS>,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+

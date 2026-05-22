@@ -1,0 +1,98 @@
+name: Compat
+
+# Phase 5 cross-protocol compatibility suite. Runs in parallel with the
+# main CI workflow so a wire-shape regression fails the build without
+# blocking the Go test pipeline. Two jobs:
+#
+#   wire    L1 byte-level wire tests (Go). Fast, no external runtime.
+#   python  L2 OpenAI Python SDK tests. Brings up mockupstream + gateway
+#           against the static-auth compat profile (no DB / no Redis).
+#
+# Both jobs share `make` orchestration so local `make compat` reproduces
+# CI exactly. Keep this principle when adding sub-suites: parity > speed.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wire:
+    name: L1 wire-compat (Go)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run wire compat suite
+        run: make compat-wire
+
+      # Defensive: if a golden file regen was accidentally committed,
+      # the suite passes but the diff would have shipped silently.
+      # `git diff` after the run catches a leaked -update-goldens.
+      - name: Verify no golden drift
+        run: |
+          if ! git diff --quiet test/testdata/golden/ ; then
+            echo "::error::Wire compat goldens were rewritten during the run."
+            echo "This likely means -update-goldens was passed somewhere it shouldn't be."
+            git diff test/testdata/golden/
+            exit 1
+          fi
+
+  python:
+    name: L2 OpenAI Python SDK compat
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Use astral-sh/setup-uv so we get the same uv version we develop
+      # against. enable-cache caches both uv's tool cache AND the
+      # per-project venv resolved from uv.lock.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.11.7"
+          enable-cache: true
+          cache-dependency-glob: "test/compat/python/uv.lock"
+
+      # Pre-sync the venv so the subsequent make target's `uv run` is
+      # a no-op resolver pass. Speeds up the green path; matches what
+      # a developer does locally.
+      - name: uv sync (frozen)
+        working-directory: test/compat/python
+        run: uv sync --frozen
+
+      - name: Run Python SDK compat suite
+        run: make compat-python
+
+      - name: Dump gateway log on failure
+        if: failure()
+        run: |
+          if [ -f .compat-gateway.log ]; then
+            echo "::group::gateway log"
+            cat .compat-gateway.log
+            echo "::endgroup::"
+          fi
+          if [ -f .compat-mock.log ]; then
+            echo "::group::mockupstream log"
+            cat .compat-mock.log
+            echo "::endgroup::"
+          fi

@@ -1,0 +1,20 @@
+# Phase 5 compat profile providers file. All traffic routed to the
+# local mockupstream binary (scripts/mockupstream). The mock is
+# request-aware — it inspects each chat request and adapts its reply
+# so the Python SDK suite can exercise tools / json_mode / logprobs /
+# stream against the same endpoint.
+
+providers:
+  - name: openai-mock
+    type: openai
+    endpoint: http://127.0.0.1:19091
+    api_key: sk-mock-not-validated
+    timeout: 30s
+    models:
+      exact:
+        - gpt-4o
+        - gpt-4o-mini
+      glob:
+        - gpt-*
+
+default_provider: openai-mock

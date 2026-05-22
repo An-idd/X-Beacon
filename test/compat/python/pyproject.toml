@@ -1,0 +1,21 @@
+[project]
+name = "xbeacon-compat-python"
+version = "0.1.0"
+description = "OpenAI Python SDK compatibility regression suite for X-Beacon."
+requires-python = ">=3.11"
+# Pin to a specific minor of the OpenAI SDK so a silent SDK change cannot
+# turn into a compat regression we'd blame on the gateway. Bump
+# deliberately when validating against a newer SDK line.
+dependencies = [
+    "openai>=1.55.0,<1.60.0",
+    "pytest>=8.0",
+    "httpx>=0.27",
+]
+
+[tool.pytest.ini_options]
+# Quiet output by default; -v from CLI when debugging.
+addopts = "-q --strict-markers"
+markers = [
+    "needs_upstream: test exercises a controllable mock upstream",
+]
+testpaths = ["."]

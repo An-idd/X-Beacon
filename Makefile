@@ -130,6 +130,55 @@ migrate-up: ## Apply all pending migrations (requires golang-migrate)
 migrate-down: ## Rollback last migration
 	migrate -database "$(MIGRATE_DSN)" -path internal/storage/migrations down 1
 
+# --- Phase 5 compat suites ----------------------------------------------
+
+# Wire (L1) compat already runs in `make test` (it's a normal Go test).
+# This target is for the Python (L2) SDK suite, which needs:
+#   - mockupstream listening on 127.0.0.1:19091
+#   - gateway listening on 127.0.0.1:18080 wired to the mock
+#   - uv-managed Python venv with pinned openai SDK
+# We orchestrate all three from one Makefile target so a developer
+# can validate the suite with one command.
+
+.PHONY: compat-wire
+compat-wire: ## Run the Go L1 wire-compat suite (subset of `make test`)
+	go test -v ./test/ -run TestWireCompat
+
+.PHONY: compat-python
+compat-python: build ## Run the OpenAI Python SDK compat suite (needs `uv`)
+	@command -v uv >/dev/null 2>&1 || { echo "uv not installed; see https://docs.astral.sh/uv/"; exit 1; }
+	@# Defensive: kill any leftover compat processes from a prior failed run.
+	@# `lsof -ti` returns PIDs only; xargs -r is a GNU extension so we
+	@# pipe through `awk` for portability.
+	@for p in 19091 18080; do \
+		pids=$$(lsof -ti tcp:$$p 2>/dev/null) ; \
+		[ -n "$$pids" ] && kill -9 $$pids 2>/dev/null || true ; \
+	done
+	@echo ">> starting mockupstream on :19091"
+	@MOCK_ADDR=127.0.0.1:19091 go run ./scripts/mockupstream > .compat-mock.log 2>&1 & echo $$! > .compat-mock.pid
+	@sleep 0.5
+	@echo ">> starting gateway on :18080 against compat profile"
+	@$(BIN_DIR)/$(BINARY) --config configs/config.compat.yaml > .compat-gateway.log 2>&1 & echo $$! > .compat-gateway.pid
+	@sleep 0.8
+	@echo ">> running pytest under uv"
+	@cd test/compat/python && \
+		XBEACON_BASE_URL=http://127.0.0.1:18080 \
+		XBEACON_API_KEY=sk-compat-test \
+		uv run --frozen pytest -v ; \
+		status=$$? ; \
+		cd ../../.. ; \
+		kill -9 $$(cat .compat-mock.pid) 2>/dev/null ; rm -f .compat-mock.pid ; \
+		kill -9 $$(cat .compat-gateway.pid) 2>/dev/null ; rm -f .compat-gateway.pid ; \
+		if [ $$status -eq 0 ]; then \
+			rm -f .compat-mock.log .compat-gateway.log ; \
+		else \
+			echo ">> retained .compat-{mock,gateway}.log for inspection (test failed)" ; \
+		fi ; \
+		exit $$status
+
+.PHONY: compat
+compat: compat-wire compat-python ## Run both L1 wire + L2 Python SDK compat suites
+
 # --- Cleanup ------------------------------------------------------------
 
 .PHONY: clean

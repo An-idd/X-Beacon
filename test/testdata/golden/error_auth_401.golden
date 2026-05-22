@@ -1,0 +1,1 @@
+{"error":{"code":"missing_credentials","message":"Missing Authorization header (expected: Bearer \u003ckey\u003e)","type":"authentication_error"}}

@@ -409,18 +409,41 @@ func buildCompressor(cfg *config.Config, tk *tokenizer.Selector, logger *zap.Log
 	return c
 }
 
-// loadAuth wires the production Authenticator. From Step 4.3, that means
-// Postgres-backed (the YAML auth.yaml path was removed).
+// loadAuth wires the production Authenticator. Two paths:
 //
-// Dev-mode tolerance is preserved: if the DB is unreachable at startup,
-// loadAuth logs a warning and returns (nil, nil) so the gateway boots
-// without auth on /v1/*. Operators who require auth must monitor for
-// the warn line; production deployments should fail readiness checks
-// (Step 4.6 /readyz) while DB is down.
-func loadAuth(ctx context.Context, pool *storage.Pool, logger *zap.Logger) (auth.Authenticator, error) {
+//  1. auth.static_keys configured in config.yaml → in-memory static auth.
+//     Takes precedence so compat / dev profiles don't need PG. No DB
+//     required; ideal for the Phase 5 SDK compat suite and small ops.
+//
+//  2. Otherwise → Postgres-backed (Step 4.3 default).
+//
+// Dev-mode tolerance is preserved on the PG path: if the DB is
+// unreachable at startup, loadAuth logs a warning and returns (nil, nil)
+// so the gateway boots without auth on /v1/*. Operators who require
+// auth must monitor for the warn line; production deployments should
+// fail readiness checks (Step 4.6 /readyz) while DB is down.
+func loadAuth(ctx context.Context, staticKeys []config.StaticAuthKey, pool *storage.Pool, logger *zap.Logger) (auth.Authenticator, error) {
+	if len(staticKeys) > 0 {
+		entries := make([]auth.StaticEntry, len(staticKeys))
+		for i, k := range staticKeys {
+			entries[i] = auth.StaticEntry{
+				ID:     k.ID,
+				Name:   k.Name,
+				Secret: k.Secret,
+				Scopes: k.Scopes,
+			}
+		}
+		authn, err := auth.NewStatic(entries)
+		if err != nil {
+			return nil, fmt.Errorf("static auth: %w", err)
+		}
+		logger.Info("static auth ready", zap.Int("keys", len(entries)))
+		return authn, nil
+	}
+
 	if pool == nil {
 		logger.Warn("DB not configured; /v1/* will be unauthenticated",
-			zap.String("hint", "set database.dsn in config.yaml to enable Postgres-backed auth"))
+			zap.String("hint", "set database.dsn or auth.static_keys in config.yaml"))
 		return nil, nil
 	}
 

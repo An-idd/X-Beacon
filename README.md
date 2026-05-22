@@ -234,6 +234,43 @@ latched 状态，并以 unix 时间戳后缀生成新 key（旧 key 不自动清
 
 完整基准测试方法和数据见 [benchmarks.md](docs/benchmarks.md)。
 
+## 兼容性矩阵
+
+X-BEACON 把 OpenAI Chat Completions API 的 wire 格式做到字节级兼容,**只需把 `base_url` 指向网关即可**,客户端代码无需改动。下面是每次 PR 都跑的回归覆盖范围(见 `.github/workflows/compat.yml`):
+
+### L1 · Wire-level(纯 HTTP / cURL 视角)
+
+| 场景                                | 锁定项                                              |
+| ----------------------------------- | --------------------------------------------------- |
+| 非流式 `/v1/chat/completions`       | JSON envelope 必备键 + 类型 + `Content-Type`        |
+| 流式 SSE                            | `data: {...}\n\n` 帧分隔 + `data: [DONE]` 终止 + `Cache-Control: no-cache` + golden 字节锁定 |
+| 错误响应 envelope                   | OpenAI shape `{"error":{"type","code","message"}}` + 401 / 400 两条路径 |
+| `/v1/models` envelope               | `{"object":"list","data":[...]}` + 每条必备 `id` / `object` / `owned_by` |
+| tool_call 响应                      | `arguments` 必须保持 JSON 字符串(不被二次编码)|
+
+### L2 · OpenAI Python SDK(`openai>=1.55.0,<1.60.0`)
+
+| SDK 方法 / 特性                                     | 覆盖                                            |
+| --------------------------------------------------- | ----------------------------------------------- |
+| `client.chat.completions.create(...)`               | basic / streaming                               |
+| `client.chat.completions.create(tools=...)`         | tools + `tool_choice="required"`                |
+| `client.chat.completions.create(response_format=)`  | `{"type":"json_object"}`                        |
+| `client.chat.completions.create(logprobs=True)`     | logprobs 字段透传                               |
+| `client.models.list()`                              | OpenAI 必备字段 + 对扩展字段(pricing / capabilities)的前向兼容 |
+| Error class 映射                                    | `AuthenticationError` × 2 / `BadRequestError`   |
+
+未覆盖矩阵(后续工作):TypeScript SDK(共用 OpenAPI codegen,边际价值低)/ LangChain `ChatOpenAI`(等真实用户反馈再补)/ Anthropic SDK(由 X-Beacon 的 OpenAI 兼容层覆盖,无独立 SDK 测试)。
+
+### 本地复现
+
+```sh
+make compat-wire     # L1 Go 测试,无外部依赖
+make compat-python   # L2 Python SDK,需要 uv (https://docs.astral.sh/uv/)
+make compat          # 全跑
+```
+
+CI 上失败时 gateway / mockupstream 日志会被自动 dump。
+
 ## 使用案例
 
 ### 案例 1：降低 LLM 调用成本

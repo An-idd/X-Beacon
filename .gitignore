@@ -37,6 +37,16 @@ Thumbs.db
 /tmp/
 /data/
 
+# Phase 5 compat suite runtime artifacts
+/.compat-*.pid
+/.compat-*.log
+# Stray binary from `go build ./scripts/mockupstream` at repo root
+/mockupstream
+# Python compat suite caches
+test/compat/python/__pycache__/
+test/compat/python/.venv/
+test/compat/python/.pytest_cache/
+
 # Claude
 /doc/
 CLAUDE.md

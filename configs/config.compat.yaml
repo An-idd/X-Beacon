@@ -1,0 +1,42 @@
+# Phase 5 compat profile. Used by `make compat-python` and the
+# .github/workflows/compat.yml CI job. Everything stripped down to
+# what the SDK suite needs:
+#   - no DB / no Redis (static auth + no cache)
+#   - one in-memory API key (sk-compat-test)
+#   - mockupstream as the only provider
+#   - listening on :18080 so it doesn't collide with a dev gateway
+
+server:
+  addr: "127.0.0.1:18080"
+  read_timeout: 10s
+  write_timeout: 600s
+  shutdown_timeout: 10s
+
+log:
+  level: warn
+  format: console
+
+observability:
+  metrics:
+    enabled: true
+    path: /metrics
+  tracing:
+    enabled: false
+
+# No DB / Redis. The static auth path below bypasses both.
+database:
+  dsn: ""
+redis:
+  addr: ""
+
+providers_file: configs/providers.compat.yaml
+
+auth:
+  static_keys:
+    - id: compat-test
+      name: "Phase 5 SDK compat suite"
+      secret: sk-compat-test
+      # admin:webui so the Day 1-2 /v1/models status field is exercised
+      # too (test_models_list_extensions_ignored_by_sdk).
+      scopes:
+        admin: ["webui"]

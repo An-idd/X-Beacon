@@ -88,7 +88,7 @@ func runWithCtx(ctx context.Context, args []string, stdout *os.File) error {
 		defer pool.Close()
 	}
 
-	authn, err := loadAuth(ctx, pool, logger)
+	authn, err := loadAuth(ctx, cfg.Auth.StaticKeys, pool, logger)
 	if err != nil {
 		return fmt.Errorf("init auth: %w", err)
 	}
