@@ -80,11 +80,66 @@ func (r ChatRequest) MarshalJSON() ([]byte, error) {
 
 // Message is a single turn in a chat. Content is string-only in Week 1;
 // multimodal (array of content parts) is deferred to later phases.
+//
+// Extra preserves unknown fields verbatim so OpenAI features the gateway
+// doesn't model semantically (notably tool_calls, refusal, audio) survive
+// the round-trip from upstream → gateway → client without being silently
+// dropped. Same pattern as ChatRequest.Extra; struct fields always win
+// over Extra on marshal.
 type Message struct {
-	Role       string `json:"role"`
-	Content    string `json:"content"`
-	Name       string `json:"name,omitempty"`
-	ToolCallID string `json:"tool_call_id,omitempty"`
+	Role       string                     `json:"role"`
+	Content    string                     `json:"content"`
+	Name       string                     `json:"name,omitempty"`
+	ToolCallID string                     `json:"tool_call_id,omitempty"`
+	Extra      map[string]json.RawMessage `json:"-"`
+}
+
+var messageKnownKeys = map[string]struct{}{
+	"role": {}, "content": {}, "name": {}, "tool_call_id": {},
+}
+
+type messageAlias Message
+
+func (m *Message) UnmarshalJSON(data []byte) error {
+	var a messageAlias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*m = Message(a)
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	for k := range messageKnownKeys {
+		delete(raw, k)
+	}
+	if len(raw) > 0 {
+		m.Extra = raw
+	}
+	return nil
+}
+
+func (m Message) MarshalJSON() ([]byte, error) {
+	// Encode known fields; omitempty handles empty Content for tool_call
+	// responses (where role=assistant, content="", tool_calls populated).
+	base, err := json.Marshal(messageAlias(m))
+	if err != nil {
+		return nil, err
+	}
+	if len(m.Extra) == 0 {
+		return base, nil
+	}
+	var merged map[string]json.RawMessage
+	if err := json.Unmarshal(base, &merged); err != nil {
+		return nil, err
+	}
+	for k, v := range m.Extra {
+		if _, reserved := messageKnownKeys[k]; reserved {
+			continue
+		}
+		merged[k] = v
+	}
+	return json.Marshal(merged)
 }
 
 // ChatResponse is the non-streaming response returned by a Provider.
@@ -99,9 +154,56 @@ type ChatResponse struct {
 }
 
 type Choice struct {
-	Index        int     `json:"index"`
-	Message      Message `json:"message"`
-	FinishReason string  `json:"finish_reason,omitempty"`
+	Index        int                        `json:"index"`
+	Message      Message                    `json:"message"`
+	FinishReason string                     `json:"finish_reason,omitempty"`
+	Extra        map[string]json.RawMessage `json:"-"`
+}
+
+var choiceKnownKeys = map[string]struct{}{
+	"index": {}, "message": {}, "finish_reason": {},
+}
+
+type choiceAlias Choice
+
+func (c *Choice) UnmarshalJSON(data []byte) error {
+	var a choiceAlias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*c = Choice(a)
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	for k := range choiceKnownKeys {
+		delete(raw, k)
+	}
+	if len(raw) > 0 {
+		c.Extra = raw
+	}
+	return nil
+}
+
+func (c Choice) MarshalJSON() ([]byte, error) {
+	base, err := json.Marshal(choiceAlias(c))
+	if err != nil {
+		return nil, err
+	}
+	if len(c.Extra) == 0 {
+		return base, nil
+	}
+	var merged map[string]json.RawMessage
+	if err := json.Unmarshal(base, &merged); err != nil {
+		return nil, err
+	}
+	for k, v := range c.Extra {
+		if _, reserved := choiceKnownKeys[k]; reserved {
+			continue
+		}
+		merged[k] = v
+	}
+	return json.Marshal(merged)
 }
 
 // Usage reports token accounting as returned by the provider. May be nil
@@ -131,9 +233,61 @@ type StreamChoice struct {
 }
 
 // MessageDelta carries the incremental message fields during streaming.
+// Extra preserves unknown delta fields (tool_calls deltas, refusal deltas)
+// verbatim — same passthrough trick as Message.Extra and for the same
+// reason: streaming tool-call args arrive as deltas and would be lost if
+// the struct didn't capture them. Modeling tool semantics is deferred to
+// Phase 6; for now we keep the wire faithful.
 type MessageDelta struct {
-	Role    string `json:"role,omitempty"`
-	Content string `json:"content,omitempty"`
+	Role    string                     `json:"role,omitempty"`
+	Content string                     `json:"content,omitempty"`
+	Extra   map[string]json.RawMessage `json:"-"`
+}
+
+var messageDeltaKnownKeys = map[string]struct{}{
+	"role": {}, "content": {},
+}
+
+type messageDeltaAlias MessageDelta
+
+func (d *MessageDelta) UnmarshalJSON(data []byte) error {
+	var a messageDeltaAlias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*d = MessageDelta(a)
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	for k := range messageDeltaKnownKeys {
+		delete(raw, k)
+	}
+	if len(raw) > 0 {
+		d.Extra = raw
+	}
+	return nil
+}
+
+func (d MessageDelta) MarshalJSON() ([]byte, error) {
+	base, err := json.Marshal(messageDeltaAlias(d))
+	if err != nil {
+		return nil, err
+	}
+	if len(d.Extra) == 0 {
+		return base, nil
+	}
+	var merged map[string]json.RawMessage
+	if err := json.Unmarshal(base, &merged); err != nil {
+		return nil, err
+	}
+	for k, v := range d.Extra {
+		if _, reserved := messageDeltaKnownKeys[k]; reserved {
+			continue
+		}
+		merged[k] = v
+	}
+	return json.Marshal(merged)
 }
 
 // StreamEvent is exactly one of {Chunk, Err}. Consumers range over the
