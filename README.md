@@ -47,12 +47,13 @@
 
 - **精确缓存**：相同请求直接命中 Redis 缓存，零上游成本
 - **精确 token 计数**：内置 tokenizer，提供准确的成本统计（按 key、按用户、按模型）
-- **智能路由**：根据任务复杂度自动选择合适的模型，避免"杀鸡用牛刀"
+- **智能路由**：规则引擎按任务复杂度选模型，支持按模型 glob + 权重百分比做金丝雀灰度（新模型 10% 流量试跑）
 
 ### 🛡️ 生产级可靠性
 
-- **多维度限流**：基于令牌桶 + 滑动窗口，支持 user × model × time 组合规则
+- **多维度限流**：令牌桶 + 滑动窗口，按请求数或 **token 数（TPM）** 计，key 可组合 api_key × model
 - **自动重试 & 降级**：区分可重试错误，供应商故障时自动切换备用
+- **Provider 热重载**：改 providers.yaml 后一个 API 调用整表原子生效，不重启、不断流
 - **熔断保护**：避免单点故障级联放大
 
 ### 📊 完整可观测性
@@ -325,6 +326,9 @@ CI 上失败时 gateway / mockupstream 日志会被自动 dump。
 - [X]  只读端点：`/admin/routing/rules` / `/admin/providers` / `/admin/ratelimit/rules` / `/admin/cache/stats`
 - [X]  审计日志（`admin_audit_logs`：key/pricing 变更，scope `admin:webui` 守门）
 - [X]  Dashboard top-models 聚合
+- [X]  Token 级限流（`unit: tokens`，TPM 按 prompt token 扣费）
+- [X]  路由谓词扩展（model glob + weight 百分比，金丝雀灰度）
+- [X]  Provider 配置热重载（`POST /admin/providers/reload`，整表原子替换）
 - [X]  WebUI v0.2（[X-Beacon-Web](https://github.com/An-idd/X-Beacon-Web)：Vue 3 + Arco + TanStack Query，9 个页面）
 - [ ]  WebUI 写功能完善（限流规则编辑、provider 健康操作）
 - [ ]  多租户隔离

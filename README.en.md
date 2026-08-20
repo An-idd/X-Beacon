@@ -49,12 +49,13 @@ As LLMs become production infrastructure, application teams keep running into th
 
 - **Exact-match response cache** — identical requests hit Redis, zero upstream cost.
 - **Accurate token accounting** — built-in tokenizer drives per-key / per-user / per-model cost reports.
-- **Smart routing** — rule engine picks the right model for the task, so you stop paying GPT-4 prices for trivia.
+- **Smart routing** — rule engine picks the right model for the task; model-glob + weight predicates enable canary rollouts (send 10% of a model's traffic to its successor).
 
 ### 🛡️ Production Reliability
 
-- **Multi-dimension rate limiting** — token bucket + sliding window, composable across user × model × time.
+- **Multi-dimension rate limiting** — token bucket + sliding window, counting requests or **tokens (TPM)**, keyed by api_key × model.
 - **Retry & fallback** — distinguishes retryable from non-retryable errors, auto-fails over to a backup provider.
+- **Provider hot reload** — edit providers.yaml, one API call swaps the table atomically; no restart, no dropped streams.
 - **Circuit breaker** — per-provider, prevents cascading failures.
 
 ### 📊 Full Observability
@@ -293,6 +294,9 @@ A SaaS team used X-BEACON's per-user accounting to discover that 0.3% of account
 - [X] Read-only endpoints: `/admin/routing/rules` / `/admin/providers` / `/admin/ratelimit/rules` / `/admin/cache/stats`
 - [X] Audit log (`admin_audit_logs`: key / pricing changes, gated by `admin:webui` scope)
 - [X] Dashboard top-models aggregation
+- [X] Token-unit rate limits (`unit: tokens`, TPM charged by prompt tokens)
+- [X] Routing predicates: model glob + weight percent (canary rollouts)
+- [X] Provider hot reload (`POST /admin/providers/reload`, atomic whole-table swap)
 - [X] WebUI v0.2 ([X-Beacon-Web](https://github.com/An-idd/X-Beacon-Web): Vue 3 + Arco + TanStack Query, 9 pages)
 - [ ] WebUI write features (rate-limit rule editor, provider health actions)
 - [ ] Multi-tenant isolation
