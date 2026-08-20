@@ -252,3 +252,66 @@ func TestDecision_Empty(t *testing.T) {
 	assert.True(t, Decision{}.Empty())
 	assert.False(t, Decision{Model: "x"}.Empty())
 }
+
+func TestClassify_ModelPredicate(t *testing.T) {
+	c, err := NewRuleClassifier([]Rule{
+		{Name: "claude-only", RouteTo: "claude-4", When: Condition{Model: "claude-*"}},
+	}, nil)
+	require.NoError(t, err)
+
+	d := c.Classify(&provider.ChatRequest{Model: "claude-3-5-sonnet",
+		Messages: []provider.Message{{Role: "user", Content: "hi"}}})
+	assert.Equal(t, "claude-4", d.Model, "glob claude-* must match")
+
+	d = c.Classify(&provider.ChatRequest{Model: "gpt-4o",
+		Messages: []provider.Message{{Role: "user", Content: "hi"}}})
+	assert.True(t, d.Empty(), "gpt-4o must not match claude-*")
+}
+
+func TestClassify_WeightPredicate_SplitsTraffic(t *testing.T) {
+	c, err := NewRuleClassifier([]Rule{
+		{Name: "canary", RouteTo: "new-model", When: Condition{Weight: 25}},
+	}, nil)
+	require.NoError(t, err)
+
+	// Deterministic rng sweep: values below 0.25 match, others don't.
+	req := &provider.ChatRequest{Model: "m", Messages: []provider.Message{{Role: "user", Content: "x"}}}
+
+	c.rng = func() float64 { return 0.10 }
+	assert.Equal(t, "new-model", c.Classify(req).Model, "0.10 < 25% must route to canary")
+
+	c.rng = func() float64 { return 0.25 }
+	assert.True(t, c.Classify(req).Empty(), "0.25 >= 25% must fall through")
+
+	c.rng = func() float64 { return 0.90 }
+	assert.True(t, c.Classify(req).Empty())
+}
+
+func TestClassify_WeightRolledOncePerRequest(t *testing.T) {
+	// Two weight rules: one roll per rule (independent), and a rule that
+	// loses its roll must not consume the next rule's chance to match.
+	c, err := NewRuleClassifier([]Rule{
+		{Name: "canary-a", RouteTo: "a", When: Condition{Weight: 10}},
+		{Name: "fallback", RouteTo: "b", When: Condition{Model: "m"}},
+	}, nil)
+	require.NoError(t, err)
+	c.rng = func() float64 { return 0.50 } // canary-a loses
+
+	req := &provider.ChatRequest{Model: "m", Messages: []provider.Message{{Role: "user", Content: "x"}}}
+	d := c.Classify(req)
+	assert.Equal(t, "b", d.Model, "losing a weight roll must fall through to later rules")
+}
+
+func TestNewRuleClassifier_ValidatesWeightAndModelGlob(t *testing.T) {
+	_, err := NewRuleClassifier([]Rule{
+		{Name: "bad-w", RouteTo: "x", When: Condition{Weight: 150}},
+	}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "weight")
+
+	_, err = NewRuleClassifier([]Rule{
+		{Name: "bad-glob", RouteTo: "x", When: Condition{Model: "claude-[" }},
+	}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "model")
+}

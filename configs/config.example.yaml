@@ -186,6 +186,15 @@ routing:
   #     route_to: gpt-4o
   #     when:
   #       min_tokens: 4000
+  #   # Canary: send 10% of claude-3-5-sonnet traffic to its successor.
+  #   # `model` is a glob on the requested model; `weight` is the percent
+  #   # of otherwise-matching requests the rule captures (rolled per
+  #   # request, losers fall through to later rules / the original model).
+  #   - name: canary-claude-4
+  #     route_to: claude-4-sonnet
+  #     when:
+  #       model: claude-3-5-*
+  #       weight: 10
 
 cache:
   exact:

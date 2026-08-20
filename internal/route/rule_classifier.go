@@ -3,6 +3,8 @@ package route
 import (
 	"errors"
 	"fmt"
+	"math/rand/v2"
+	"path"
 	"strings"
 
 	"github.com/An-idd/x-beacon/internal/provider"
@@ -51,6 +53,19 @@ type Condition struct {
 	// in the user content. Useful for "default route except for
 	// these tricky topics".
 	KeywordsNone []string
+
+	// Model matches the request's declared model id, glob-style
+	// (path.Match: "claude-*" etc; a literal id matches exactly).
+	// Empty = skip. Combined with Weight this is the canary idiom:
+	// route N% of one model's traffic to its successor.
+	Model string
+
+	// Weight matches the request with this probability, in percent
+	// (0 < w <= 100). 0 = skip the check. Each rule rolls
+	// independently per request; a losing roll falls through to
+	// later rules, so a 10% canary steals exactly 10% of the traffic
+	// the rest of its conditions select.
+	Weight float64
 }
 
 // RuleClassifier evaluates rules in order. The Tokenizer dep is
@@ -60,6 +75,7 @@ type Condition struct {
 type RuleClassifier struct {
 	rules     []Rule
 	tokenizer *tokenizer.Selector
+	rng       func() float64 // [0,1); rand.Float64 in production, injected in tests
 }
 
 // NewRuleClassifier validates rules and returns a Classifier. Errors
@@ -78,8 +94,16 @@ func NewRuleClassifier(rules []Rule, tk *tokenizer.Selector) (*RuleClassifier, e
 			return nil, fmt.Errorf("route: duplicate rule name %q", r.Name)
 		}
 		seen[r.Name] = struct{}{}
+		if w := r.When.Weight; w < 0 || w > 100 {
+			return nil, fmt.Errorf("route: rule %q weight %v out of (0,100]", r.Name, w)
+		}
+		if r.When.Model != "" {
+			if _, err := path.Match(r.When.Model, "probe"); err != nil {
+				return nil, fmt.Errorf("route: rule %q model glob %q: %w", r.Name, r.When.Model, err)
+			}
+		}
 	}
-	return &RuleClassifier{rules: rules, tokenizer: tk}, nil
+	return &RuleClassifier{rules: rules, tokenizer: tk, rng: rand.Float64}, nil
 }
 
 // Classify walks the rule list and returns the first match. Empty
@@ -102,6 +126,16 @@ func (c *RuleClassifier) Classify(req *provider.ChatRequest) Decision {
 	contentJoined := false
 
 	for _, r := range c.rules {
+		// Cheap predicates first: model glob, then the weight roll —
+		// the roll happens only after every deterministic condition
+		// on the rule has matched, so Weight means "N% of the traffic
+		// this rule otherwise selects".
+		if r.When.Model != "" {
+			if ok, _ := path.Match(r.When.Model, req.Model); !ok {
+				continue
+			}
+		}
+
 		if r.When.MaxTokens > 0 || r.When.MinTokens > 0 {
 			if !tokenCounted {
 				tokenCount = c.countTokens(req)
@@ -126,6 +160,10 @@ func (c *RuleClassifier) Classify(req *provider.ChatRequest) Decision {
 			if len(r.When.KeywordsNone) > 0 && anyKeywordPresent(userContent, r.When.KeywordsNone) {
 				continue
 			}
+		}
+
+		if r.When.Weight > 0 && c.rng()*100 >= r.When.Weight {
+			continue
 		}
 
 		return Decision{Model: r.RouteTo, Rule: r.Name}

@@ -70,6 +70,8 @@ type RoutingRule struct {
 // "don't check".
 type RoutingCondition struct {
 	MaxTokens    int      `mapstructure:"max_tokens"`
+	Model        string   `mapstructure:"model"`  // glob on the request's model id
+	Weight       float64  `mapstructure:"weight"` // percent (0,100]; canary/traffic split
 	MinTokens    int      `mapstructure:"min_tokens"`
 	KeywordsAny  []string `mapstructure:"keywords_any"`
 	KeywordsNone []string `mapstructure:"keywords_none"`

@@ -266,6 +266,8 @@ func buildClassifier(cfg *config.Config, tk *tokenizer.Selector, logger *zap.Log
 				MinTokens:    r.When.MinTokens,
 				KeywordsAny:  append([]string(nil), r.When.KeywordsAny...),
 				KeywordsNone: append([]string(nil), r.When.KeywordsNone...),
+				Model:        r.When.Model,
+				Weight:       r.When.Weight,
 			},
 		})
 	}
