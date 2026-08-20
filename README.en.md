@@ -297,6 +297,12 @@ A SaaS team used X-BEACON's per-user accounting to discover that 0.3% of account
 - [ ] WebUI write features (rate-limit rule editor, provider health actions)
 - [ ] Multi-tenant isolation
 
+### 📋 Planned — v0.5 (performance evidence)
+
+- [ ] bench.sh emits a single "gateway net overhead" metric (same yardstick as Bifrost 0.62ms / LiteLLM 5.83ms), reproducible via `make bench`
+- [ ] Replace every number in the README perf tables with that script's output (machine spec + commit hash attached)
+- [ ] Optional CI job: archive a bench run per release to catch perf regressions
+
 ### 💭 Exploring
 
 - [ ] More providers (Wenxin, Kimi, Gemini)

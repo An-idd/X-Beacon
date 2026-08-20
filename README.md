@@ -329,6 +329,12 @@ CI 上失败时 gateway / mockupstream 日志会被自动 dump。
 - [ ]  WebUI 写功能完善（限流规则编辑、provider 健康操作）
 - [ ]  多租户隔离
 
+### 📋 计划中（v0.5 - 性能证明）
+
+- [ ]  bench.sh 输出"网关净开销"单指标（对标 Bifrost 0.62ms / LiteLLM 5.83ms 的口径），`make bench` 一键复现
+- [ ]  README 性能表全部数字换成该脚本的输出（附机器规格与 commit hash）
+- [ ]  CI 可选 job：每次 release 跑一轮 bench 存档，防性能回归
+
 ### 💭 探索中
 
 - [ ]  支持更多 provider（文心、Kimi、Gemini）
