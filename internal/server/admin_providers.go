@@ -9,6 +9,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"go.uber.org/zap"
 
+	"github.com/An-idd/x-beacon/internal/audit"
 	"github.com/An-idd/x-beacon/internal/provider/registry"
 	"github.com/An-idd/x-beacon/internal/server/middleware"
 )
@@ -150,4 +151,61 @@ func labelValueDirect(labels []*dto.LabelPair, name string) string {
 		}
 	}
 	return ""
+}
+
+// adminProvidersReloadHandler re-reads the providers file and atomically
+// swaps the registry's provider table (Spring Gateway-style whole-table
+// refresh: validate the new table fully, then one pointer swap — readers
+// never see a half-updated state; a bad file leaves the old table
+// untouched). In-flight requests finish on the table they resolved.
+//
+// Circuit-breaker state lives in the router keyed by provider NAME, so
+// providers that keep their name across a reload keep their breaker
+// history automatically.
+func adminProvidersReloadHandler(reg *registry.Registry, providersFile string, auditRec audit.Recorder, logger *zap.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		reqID := middleware.RequestIDFrom(r.Context())
+		if providersFile == "" {
+			writeError(w, mappedError{
+				Status:  http.StatusConflict,
+				Type:    "invalid_request_error",
+				Code:    "no_providers_file",
+				Message: "Gateway was started without a providers file; nothing to reload",
+			}, reqID)
+			return
+		}
+
+		fresh, err := registry.Load(providersFile)
+		if err != nil {
+			logger.Warn("providers reload rejected",
+				zap.String("req_id", reqID),
+				zap.String("path", providersFile),
+				zap.Error(err))
+			writeError(w, mappedError{
+				Status:  http.StatusBadRequest,
+				Type:    "invalid_request_error",
+				Code:    "providers_file_invalid",
+				Message: "Providers file failed validation; keeping the current table: " + err.Error(),
+			}, reqID)
+			return
+		}
+
+		reg.Swap(fresh)
+		names := reg.Names()
+		models := len(reg.AllModels())
+		logger.Info("providers reloaded",
+			zap.String("req_id", reqID),
+			zap.Strings("names", names),
+			zap.Int("models", models))
+		recordAudit(r.Context(), auditRec, r, audit.ActionProvidersReload,
+			"providers_file", providersFile,
+			map[string]any{"providers": names, "models": models}, logger)
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = jsonEncode(w, map[string]any{
+			"reloaded":  true,
+			"providers": names,
+			"models":    models,
+		})
+	}
 }

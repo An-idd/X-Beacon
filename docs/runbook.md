@@ -256,6 +256,20 @@ v0.2 加 retention 策略（建议 90d 滚动 DELETE，30 min batch）。
 
 ---
 
+## 4.5 Provider 热重载
+
+改了 `configs/providers.yaml`（加 provider、换 key、调模型列表）后无需重启：
+
+```bash
+curl -X POST http://localhost:8080/admin/providers/reload \
+  -H "Authorization: Bearer $ADMIN_KEY"
+```
+
+- 校验失败返回 400 并**保留旧表**，网关不受影响；错误信息里有具体哪条配置坏了
+- 换表是整表原子替换，进行中的请求（含流式）继续用旧表跑完
+- 同名 provider 的熔断器状态跨重载保留（按名字键控）
+- 审计动作：`providers.reload`（记录 provider 列表与模型数）
+
 ## 5. 健康检查与 readiness
 
 - `/healthz` — 进程活着即返回 200。**不要**用作 LB 探针，否则 DB 挂掉时仍会派流量。

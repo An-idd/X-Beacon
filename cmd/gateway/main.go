@@ -165,6 +165,7 @@ func runWithCtx(ctx context.Context, args []string, stdout *os.File) error {
 	srv, err := server.New(server.Deps{
 		Logger:            logger,
 		Registry:          reg,
+		ProvidersFile:     cfg.ProvidersFile,
 		Router:            rtr,
 		Tokenizer:         tk,
 		Billing:           billingWorker,

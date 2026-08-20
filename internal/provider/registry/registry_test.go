@@ -45,7 +45,7 @@ func buildTestRegistry(t *testing.T) *Registry {
 	})
 	require.NoError(t, err)
 
-	reg := &Registry{
+	reg := newRegistry(&registryState{
 		names:      []string{"openai-primary", "azure-openai", "deepseek"},
 		byName:     map[string]provider.Provider{"openai-primary": primary, "azure-openai": azure, "deepseek": ds},
 		exactIndex: map[string]provider.Provider{"gpt-4o": primary, "gpt-4o-mini": primary, "gpt-4o-azure": azure, "deepseek-chat": ds},
@@ -55,7 +55,7 @@ func buildTestRegistry(t *testing.T) *Registry {
 			{pattern: "gpt-4-*", provider: azure}, // later; loses on ties
 		},
 		defaultProvider: primary,
-	}
+	})
 	return reg
 }
 
@@ -114,7 +114,7 @@ func TestRegistry_ResolveModel_DefaultFallback(t *testing.T) {
 
 func TestRegistry_ResolveModel_NoDefaultReturnsError(t *testing.T) {
 	reg := buildTestRegistry(t)
-	reg.defaultProvider = nil
+	reg.state.Load().defaultProvider = nil
 
 	_, err := reg.ResolveModel("llama-3-70b")
 	require.Error(t, err)
@@ -153,7 +153,7 @@ func TestRegistry_ResolveChain_ExactWinsThenGlobs(t *testing.T) {
 
 func TestRegistry_ResolveChain_NoMatchEmpty(t *testing.T) {
 	reg := buildTestRegistry(t)
-	reg.defaultProvider = nil
+	reg.state.Load().defaultProvider = nil
 	chain := reg.ResolveChain("zzz-unknown")
 	assert.Empty(t, chain)
 }
@@ -188,4 +188,28 @@ func TestRegistry_AllModels_FlatSortedDedup(t *testing.T) {
 		assert.Equal(t, "model", m.Object)
 		assert.NotEmpty(t, m.Provider)
 	}
+}
+
+func TestRegistry_Swap_AtomicallyReplacesTable(t *testing.T) {
+	old := buildTestRegistry(t)
+
+	replacement, err := openai.New(openai.Config{
+		Name: "replacement", APIKey: "sk-r",
+		Models: openai.Models{Exact: []string{"new-model"}},
+	})
+	require.NoError(t, err)
+	fresh := newRegistry(&registryState{
+		names:      []string{"replacement"},
+		byName:     map[string]provider.Provider{"replacement": replacement},
+		exactIndex: map[string]provider.Provider{"new-model": replacement},
+	})
+
+	old.Swap(fresh)
+
+	p, err := old.ResolveModel("new-model")
+	require.NoError(t, err)
+	assert.Equal(t, "replacement", p.Name())
+	_, err = old.ResolveModel("gpt-4o")
+	assert.Error(t, err, "old table must be fully gone after swap")
+	assert.Equal(t, []string{"replacement"}, old.Names())
 }

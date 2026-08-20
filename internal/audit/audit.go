@@ -29,6 +29,8 @@ const (
 	ActionKeyRevoke     Action = "key.revoke"
 	ActionPricingUpsert Action = "pricing.upsert"
 	ActionPricingDelete Action = "pricing.delete"
+	// ActionProvidersReload records a hot reload of the providers file.
+	ActionProvidersReload Action = "providers.reload"
 )
 
 // Entry is one audit row's input. Recorder.Record takes this

@@ -67,7 +67,7 @@ func build(pf *providersFile) (*Registry, error) {
 		return nil, errors.New("registry: providers list is empty")
 	}
 
-	reg := &Registry{
+	st := &registryState{
 		names:      make([]string, 0, len(pf.Providers)),
 		byName:     make(map[string]provider.Provider, len(pf.Providers)),
 		exactIndex: make(map[string]provider.Provider),
@@ -84,7 +84,7 @@ func build(pf *providersFile) (*Registry, error) {
 			errs = append(errs, err)
 			continue
 		}
-		if _, dup := reg.byName[pc.Name]; dup {
+		if _, dup := st.byName[pc.Name]; dup {
 			errs = append(errs, fmt.Errorf("providers[%d]: duplicate name %q", i, pc.Name))
 			continue
 		}
@@ -93,8 +93,8 @@ func build(pf *providersFile) (*Registry, error) {
 			errs = append(errs, fmt.Errorf("providers[%d] %q: %w", i, pc.Name, err))
 			continue
 		}
-		reg.names = append(reg.names, pc.Name)
-		reg.byName[pc.Name] = p
+		st.names = append(st.names, pc.Name)
+		st.byName[pc.Name] = p
 
 		for _, m := range pc.Models.Exact {
 			if owner, taken := exactOwner[m]; taken {
@@ -104,30 +104,30 @@ func build(pf *providersFile) (*Registry, error) {
 				continue
 			}
 			exactOwner[m] = pc.Name
-			reg.exactIndex[m] = p
+			st.exactIndex[m] = p
 		}
 		for _, g := range pc.Models.Glob {
 			if _, err := path.Match(g, ""); err != nil {
 				errs = append(errs, fmt.Errorf("providers[%d] %q: invalid glob %q: %w", i, pc.Name, g, err))
 				continue
 			}
-			reg.globRules = append(reg.globRules, globRule{pattern: g, provider: p})
+			st.globRules = append(st.globRules, globRule{pattern: g, provider: p})
 		}
 	}
 
 	if pf.DefaultProvider != "" {
-		p, ok := reg.byName[pf.DefaultProvider]
+		p, ok := st.byName[pf.DefaultProvider]
 		if !ok {
 			errs = append(errs, fmt.Errorf("default_provider %q not registered", pf.DefaultProvider))
 		} else {
-			reg.defaultProvider = p
+			st.defaultProvider = p
 		}
 	}
 
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("registry: load failed: %w", errors.Join(errs...))
 	}
-	return reg, nil
+	return newRegistry(st), nil
 }
 
 func validateProviderConfig(idx int, pc *providerConfig) error {

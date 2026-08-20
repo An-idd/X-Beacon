@@ -102,6 +102,11 @@ type Deps struct {
 	// reverse-engineering it from the live limiters.
 	RateLimitRules []config.RateLimitRule
 
+	// ProvidersFile is the path providers were loaded from at startup;
+	// /admin/providers/reload re-reads it. Empty = reload disabled
+	// (gateway started without a providers file).
+	ProvidersFile string
+
 	// Audit records mutating admin actions (key create/revoke,
 	// pricing upsert/delete). Defaults to audit.Nop() when nil so
 	// admin handlers can call without nil checks; production wires
@@ -346,6 +351,8 @@ func New(deps Deps) (*Server, error) {
 				p.Use(middleware.Auth(deps.Authn, deps.Logger))
 				p.Use(middleware.RequireScope("admin", "webui", deps.Logger))
 				p.Get("/", adminProvidersHandler(deps.Registry, deps.MetricsReg, deps.Logger))
+				// Whole-table hot reload of the providers file.
+				p.Post("/reload", adminProvidersReloadHandler(deps.Registry, deps.ProvidersFile, deps.Audit, deps.Logger))
 			})
 
 			// /admin/ratelimit/rules: read-only view of configured

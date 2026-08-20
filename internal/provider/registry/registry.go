@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path"
 	"sort"
+	"sync/atomic"
 
 	"github.com/An-idd/x-beacon/internal/provider"
 )
@@ -22,8 +23,17 @@ var (
 )
 
 // Registry owns the set of provider adapters and routes model IDs to them.
-// After Load returns, the Registry is safe for concurrent read use.
+// Reads are lock-free; the entire provider table lives behind one atomic
+// pointer so Swap can replace it wholesale at runtime (hot reload) without
+// readers ever observing a half-updated table.
 type Registry struct {
+	state atomic.Pointer[registryState]
+}
+
+// registryState is the immutable provider table. Built once by Load /
+// NewEmpty, never mutated afterwards — hot reload builds a fresh state
+// and swaps the pointer.
+type registryState struct {
 	// Stable ordering for Names(); matches providers.yaml declaration order.
 	names []string
 
@@ -42,6 +52,20 @@ type Registry struct {
 	defaultProvider provider.Provider
 }
 
+// newRegistry wraps a built state in a Registry.
+func newRegistry(st *registryState) *Registry {
+	r := &Registry{}
+	r.state.Store(st)
+	return r
+}
+
+// Swap atomically replaces this Registry's provider table with from's.
+// In-flight requests keep the table they already resolved against; new
+// requests see the new one. Used by the /admin/reload endpoint.
+func (r *Registry) Swap(from *Registry) {
+	r.state.Store(from.state.Load())
+}
+
 type globRule struct {
 	pattern  string
 	provider provider.Provider
@@ -51,15 +75,15 @@ type globRule struct {
 // without a providers.yaml file (bootstrapping / smoke tests). All lookup
 // methods return a well-typed "no match" error; AllModels returns nil.
 func NewEmpty() *Registry {
-	return &Registry{
+	return newRegistry(&registryState{
 		byName:     make(map[string]provider.Provider),
 		exactIndex: make(map[string]provider.Provider),
-	}
+	})
 }
 
 // GetByName looks up a provider by its configured name (e.g. "openai-primary").
 func (r *Registry) GetByName(name string) (provider.Provider, error) {
-	p, ok := r.byName[name]
+	p, ok := r.state.Load().byName[name]
 	if !ok {
 		return nil, fmt.Errorf("%w: %q", ErrUnknownProvider, name)
 	}
@@ -90,6 +114,7 @@ func (r *Registry) ResolveModel(model string) (provider.Provider, error) {
 // Used by the router (Week 6) to fail over to the next-best provider when
 // the primary returns a retryable error. Returns nil when no tier matches.
 func (r *Registry) ResolveChain(model string) []provider.Provider {
+	st := r.state.Load()
 	chain := make([]provider.Provider, 0, 3)
 	seen := make(map[string]struct{}, 3)
 	add := func(p provider.Provider) {
@@ -103,10 +128,10 @@ func (r *Registry) ResolveChain(model string) []provider.Provider {
 		chain = append(chain, p)
 	}
 
-	if p, ok := r.exactIndex[model]; ok {
+	if p, ok := st.exactIndex[model]; ok {
 		add(p)
 	}
-	for _, rule := range r.globRules {
+	for _, rule := range st.globRules {
 		matched, err := path.Match(rule.pattern, model)
 		if err != nil {
 			// A malformed pattern should have been rejected at Load time;
@@ -118,14 +143,15 @@ func (r *Registry) ResolveChain(model string) []provider.Provider {
 			add(rule.provider)
 		}
 	}
-	add(r.defaultProvider)
+	add(st.defaultProvider)
 	return chain
 }
 
 // Names returns all registered provider names in declaration order.
 func (r *Registry) Names() []string {
-	out := make([]string, len(r.names))
-	copy(out, r.names)
+	st := r.state.Load()
+	out := make([]string, len(st.names))
+	copy(out, st.names)
 	return out
 }
 
@@ -133,10 +159,11 @@ func (r *Registry) Names() []string {
 // by ID for stable /v1/models responses. Duplicates (same model ID from
 // different providers) keep the first occurrence by declaration order.
 func (r *Registry) AllModels() []provider.ModelInfo {
+	st := r.state.Load()
 	seen := make(map[string]struct{})
 	out := make([]provider.ModelInfo, 0)
-	for _, name := range r.names {
-		for _, m := range r.byName[name].SupportedModels() {
+	for _, name := range st.names {
+		for _, m := range st.byName[name].SupportedModels() {
 			if _, dup := seen[m.ID]; dup {
 				continue
 			}
