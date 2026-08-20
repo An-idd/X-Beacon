@@ -6,6 +6,8 @@
 
 A unified entry point for teams that consume multiple LLM providers — built to tame cost, reliability, and observability in one place.
 
+[![CI](https://github.com/An-idd/x-beacon/actions/workflows/ci.yml/badge.svg)](https://github.com/An-idd/x-beacon/actions/workflows/ci.yml)
+[![Compat](https://github.com/An-idd/x-beacon/actions/workflows/compat.yml/badge.svg)](https://github.com/An-idd/x-beacon/actions/workflows/compat.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/An-idd/x-beacon)](https://goreportcard.com/report/github.com/An-idd/x-beacon)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/go-1.22%2B-00ADD8.svg)](https://golang.org)
@@ -26,25 +28,26 @@ As LLMs become production infrastructure, application teams keep running into th
 2. **Runaway cost** — Duplicate prompts, oversized models for trivial tasks, and no per-user / per-team cost attribution.
 3. **Production fragility** — A single upstream outage halts the product. Most stacks lack retries, fallback, and rate limiting out of the box.
 
-**X-BEACON sits between your app and the model providers** as a single gateway. One API surface, plus semantic caching, smart routing, and distributed rate limiting — so AI features actually behave like production systems.
+**X-BEACON sits between your app and the model providers** as a single gateway. One API surface, plus response caching, smart routing, and rate limiting with circuit breaking — so AI features actually behave like production systems.
 
 ## Features
 
 ### 🌐 Unified API
 
-- OpenAI-compatible wire format — existing code drops in with near-zero changes.
+- OpenAI-compatible wire format — existing code drops in with near-zero changes. Field-level fidelity contract (what passes through verbatim, incl. `usage.prompt_tokens_details`; what the gateway may rewrite): [compatibility.md](docs/compatibility.md).
 - First-class support for OpenAI, Anthropic, DeepSeek, Qwen, Doubao, and more.
 - Streaming (SSE) normalized across providers.
+- Native Anthropic `/v1/messages` passthrough endpoint — thinking blocks and beta features survive byte-identical.
 
 ### 🚀 Performance
 
-- **5,000+ QPS** per node, **P99 < 20ms** for gateway overhead (excluding upstream model latency).
+- **5,000+ QPS** per node, **P99 < 20ms** for gateway overhead (excluding upstream model latency; [reproducible methodology](docs/benchmarks.md)).
 - Native Go: pooled connections, streaming forward, <500MB resident memory.
 - Async billing and log writes — never on the request hot path.
 
 ### 💰 Cost Control
 
-- **Semantic cache** based on embedding similarity — typical repeat-query workloads see 60%+ savings.
+- **Exact-match response cache** — identical requests hit Redis, zero upstream cost.
 - **Accurate token accounting** — built-in tokenizer drives per-key / per-user / per-model cost reports.
 - **Smart routing** — rule engine picks the right model for the task, so you stop paying GPT-4 prices for trivia.
 
@@ -63,14 +66,26 @@ As LLMs become production infrastructure, application teams keep running into th
 
 ## Quick Start
 
-### Docker Compose (recommended)
+### Zero-dependency start (recommended)
+
+The gateway is a **stateless proxy** by default — no Postgres, no Redis, no Docker. One binary:
 
 ```bash
 git clone https://github.com/An-idd/x-beacon.git
 cd x-beacon
-cp configs/config.example.yaml configs/config.yaml
-# Edit config.yaml with your OpenAI / Anthropic API keys
-docker-compose up -d
+cp configs/providers.example.yaml configs/providers.yaml
+# Edit providers.yaml with your OpenAI / Anthropic API keys
+make dev   # auto-creates configs/config.yaml on first run (includes a static API key)
+```
+
+### Optional: Postgres / Redis
+
+Add them only when you need DB-managed API keys, request logs + cost attribution, response caching, or cross-instance rate limits:
+
+```bash
+docker-compose up -d          # postgres + redis
+xbctl migrate up              # schema
+# then uncomment database.dsn / redis.addr in config.yaml
 ```
 
 Once up:
@@ -84,7 +99,7 @@ Once up:
 ```bash
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer hs_test_key" \
+  -H "Authorization: Bearer sk-local-dev-change-me" \
   -d '{
     "model": "gpt-4o-mini",
     "messages": [{"role": "user", "content": "Hello, X-BEACON!"}]
@@ -98,7 +113,7 @@ from openai import OpenAI
 
 client = OpenAI(
     base_url="http://localhost:8080/v1",
-    api_key="hs_test_key"
+    api_key="sk-local-dev-change-me"
 )
 
 # Claude
@@ -225,27 +240,22 @@ Measured on AWS c6i.xlarge (4 vCPU, 8GB RAM):
 | ------------------------------ | ------ | ----------- | ----------- | ---------------------- |
 | Empty request (gateway only)   | 8,200  | 1.2ms       | 4.8ms       | Excludes upstream call |
 | Exact cache hit                | 12,500 | 0.8ms       | 3.2ms       | Redis-backed           |
-| Semantic cache hit             | 3,800  | 4.5ms       | 15ms        | Includes embedding     |
 | Rate-limit check               | 7,500  | 1.5ms       | 6ms         | Distributed limiter    |
 
 Versus comparable projects:
 
 
-| Project      | Language | Empty-request P99 | Memory    | Semantic cache |
-| ------------ | -------- | ----------------- | --------- | -------------- |
-| **X-BEACON** | **Go**   | **4.8ms**         | **380MB** | **✅**         |
-| LiteLLM      | Python   | ~80ms             | ~1.2GB    | ❌             |
-| OneAPI       | Go       | ~15ms             | ~500MB    | ❌             |
+| Project      | Language | Empty-request P99 | Memory    |
+| ------------ | -------- | ----------------- | --------- |
+| **X-BEACON** | **Go**   | **4.8ms**         | **380MB** |
+| LiteLLM      | Python   | ~80ms             | ~1.2GB    |
+| OneAPI       | Go       | ~15ms             | ~500MB    |
 
 Methodology and full data in [benchmarks.md](docs/benchmarks.md).
 
 ## Case Studies
 
-### 1. Cutting LLM spend
-
-An online-education team integrated X-BEACON's semantic cache and reached a 38% hit rate on student "homework help" queries, trimming the monthly OpenAI bill by $4,200.
-
-### 2. Multi-provider failover
+### Multi-provider failover
 
 A customer-support product survived a 2-hour OpenAI global outage by transparently failing over to Claude — no end-user impact.
 
@@ -274,7 +284,6 @@ A SaaS team used X-BEACON's per-user accounting to discover that 0.3% of account
 ### ✅ Done — v0.3 (differentiators)
 
 - [X] Exact cache (Redis SHA-256 key + 4 anti-pollution gates)
-- [X] Semantic cache (RediSearch HNSW, per-model index isolation)
 - [X] Smart routing (token count + keyword rules, scope-based A/B opt-out)
 - [X] Prompt compaction (system message always kept + sliding window + token budget)
 
@@ -299,6 +308,7 @@ A SaaS team used X-BEACON's per-user accounting to discover that 0.3% of account
 
 - [Architecture](docs/architecture.md) — system design, key decisions, trade-offs
 - [Benchmarks](docs/benchmarks.md) — methodology and full data
+- [Compatibility contract](docs/compatibility.md) — field-level wire-fidelity guarantees, CI-locked
 - [Runbook](docs/runbook.md) — cache / routing / compaction / billing ops
 - [Deployment](docs/deployment.md) — production deployment guide
 - [Configuration](docs/configuration.md) — every config option
@@ -318,7 +328,7 @@ A SaaS team used X-BEACON's per-user accounting to discover that 0.3% of account
 - [OneAPI](https://github.com/songquanpeng/one-api) — Go, popular in the Chinese community
 - [Portkey](https://github.com/Portkey-AI/gateway) — commercial AI gateway
 
-Why X-BEACON: better performance, stronger production-readiness, unique semantic caching. Full comparison in [architecture.md](docs/architecture.md#与同类项目对比).
+Why X-BEACON: stateless lightweight architecture, better performance, stronger production-readiness. Full comparison in [architecture.md](docs/architecture.md#与同类项目对比).
 
 ## License
 

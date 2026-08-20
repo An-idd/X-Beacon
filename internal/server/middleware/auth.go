@@ -26,10 +26,10 @@ import (
 func Auth(authn auth.Authenticator, logger *zap.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			key, ok := bearerToken(r.Header.Get("Authorization"))
+			key, ok := credentialFrom(r)
 			if !ok {
 				writeAuthError(w, http.StatusUnauthorized, "missing_credentials",
-					"Missing Authorization header (expected: Bearer <key>)")
+					"Missing credentials (expected: Authorization: Bearer <key>, or x-api-key header)")
 				logger.Warn("auth rejected: missing credentials",
 					zap.String("req_id", RequestIDFrom(r.Context())),
 					zap.String("path", r.URL.Path))
@@ -66,6 +66,20 @@ func Auth(authn auth.Authenticator, logger *zap.Logger) func(http.Handler) http.
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// credentialFrom extracts the API key from the request. Precedence:
+// Authorization: Bearer (primary, OpenAI-style) then x-api-key
+// (Anthropic-SDK style, used by /v1/messages clients). Both resolve to
+// the same key space — one gateway key works with either SDK family.
+func credentialFrom(r *http.Request) (string, bool) {
+	if key, ok := bearerToken(r.Header.Get("Authorization")); ok {
+		return key, true
+	}
+	if key := strings.TrimSpace(r.Header.Get("x-api-key")); key != "" {
+		return key, true
+	}
+	return "", false
 }
 
 // bearerToken parses the Authorization header value and returns the bearer

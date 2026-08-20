@@ -162,3 +162,39 @@ var assertedBackendErr = errBackend("simulated backend outage")
 type errBackend string
 
 func (e errBackend) Error() string { return string(e) }
+
+func TestAuth_XAPIKeyHeader_Accepted(t *testing.T) {
+	// Anthropic SDKs authenticate with `x-api-key`, not `Authorization:
+	// Bearer`. The /v1/messages endpoint shares this middleware, so both
+	// schemes must resolve to the same principal lookup.
+	authn := &fakeAuthn{want: "sk-good", principal: &auth.Principal{ID: "key-1", Name: "n"}}
+	var captured *auth.Principal
+	h := Auth(authn, zap.NewNop())(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		captured = auth.PrincipalFrom(r.Context())
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	req.Header.Set("x-api-key", "sk-good")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	require.NotNil(t, captured)
+	assert.Equal(t, "key-1", captured.ID)
+}
+
+func TestAuth_BearerWinsOverXAPIKey(t *testing.T) {
+	// Both headers present: Authorization wins (deterministic precedence,
+	// matches the primary documented scheme). fakeAuthn only accepts
+	// `want`, so success proves the Bearer value was the one looked up.
+	authn := &fakeAuthn{want: "from-bearer", principal: &auth.Principal{ID: "key-1"}}
+	h := Auth(authn, zap.NewNop())(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer from-bearer")
+	req.Header.Set("x-api-key", "from-xapikey")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+}

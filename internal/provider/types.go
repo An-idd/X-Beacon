@@ -209,10 +209,63 @@ func (c Choice) MarshalJSON() ([]byte, error) {
 // Usage reports token accounting as returned by the provider. May be nil
 // if the provider doesn't include it; the billing pipeline is responsible
 // for computing a local estimate in that case.
+//
+// Extra preserves unknown fields verbatim — notably
+// prompt_tokens_details.cached_tokens (OpenAI prompt-cache reporting) and
+// completion_tokens_details.reasoning_tokens — so clients making
+// cost/caching decisions see exactly what the upstream reported. Same
+// pattern as ChatRequest.Extra; struct fields win over Extra on marshal.
 type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens     int                        `json:"prompt_tokens"`
+	CompletionTokens int                        `json:"completion_tokens"`
+	TotalTokens      int                        `json:"total_tokens"`
+	Extra            map[string]json.RawMessage `json:"-"`
+}
+
+var usageKnownKeys = map[string]struct{}{
+	"prompt_tokens": {}, "completion_tokens": {}, "total_tokens": {},
+}
+
+type usageAlias Usage
+
+func (u *Usage) UnmarshalJSON(data []byte) error {
+	var a usageAlias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*u = Usage(a)
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	for k := range usageKnownKeys {
+		delete(raw, k)
+	}
+	if len(raw) > 0 {
+		u.Extra = raw
+	}
+	return nil
+}
+
+func (u Usage) MarshalJSON() ([]byte, error) {
+	base, err := json.Marshal(usageAlias(u))
+	if err != nil {
+		return nil, err
+	}
+	if len(u.Extra) == 0 {
+		return base, nil
+	}
+	var merged map[string]json.RawMessage
+	if err := json.Unmarshal(base, &merged); err != nil {
+		return nil, err
+	}
+	for k, v := range u.Extra {
+		if _, reserved := usageKnownKeys[k]; reserved {
+			continue
+		}
+		merged[k] = v
+	}
+	return json.Marshal(merged)
 }
 
 // ChatStreamChunk is one frame of a streaming response. A terminal chunk

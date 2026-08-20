@@ -377,3 +377,97 @@ func tail(s string, n int) string {
 	}
 	return "..." + s[len(s)-n:]
 }
+
+// ---------- L1: usage token-details passthrough (prompt-cache reporting) ----------
+
+func TestWireCompat_NonStreaming_UsageDetailsPassthrough(t *testing.T) {
+	// prompt_tokens_details.cached_tokens is how OpenAI reports prompt-
+	// cache hits. Industry surveys measure that most gateways silently
+	// drop it, which makes client-side cache/cost accounting impossible.
+	// X-Beacon forwards it verbatim — lock that with a wire test.
+	upstream := `{
+		"id":"chatcmpl-ud-1","object":"chat.completion","created":1714000002,"model":"gpt-4o",
+		"choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],
+		"usage":{
+			"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,
+			"prompt_tokens_details":{"cached_tokens":80,"audio_tokens":0},
+			"completion_tokens_details":{"reasoning_tokens":5,"accepted_prediction_tokens":0}
+		}
+	}`
+
+	fx := newFixture(t,
+		func(w http.ResponseWriter, _ *http.Request) { writeJSON(t, w, upstream) },
+		func(http.ResponseWriter, *http.Request) {},
+		func(http.ResponseWriter, *http.Request) {},
+	)
+	defer fx.Close()
+
+	status, _, raw := fx.post(t, "/v1/chat/completions", chatRequest("gpt-4o", false), true)
+	require.Equal(t, http.StatusOK, status)
+
+	var envelope struct {
+		Usage map[string]json.RawMessage `json:"usage"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &envelope))
+	require.NotNil(t, envelope.Usage)
+
+	assert.JSONEq(t, `100`, string(envelope.Usage["prompt_tokens"]))
+	require.Contains(t, envelope.Usage, "prompt_tokens_details",
+		"prompt_tokens_details must survive the gateway round-trip")
+	assert.JSONEq(t, `{"cached_tokens":80,"audio_tokens":0}`,
+		string(envelope.Usage["prompt_tokens_details"]))
+	require.Contains(t, envelope.Usage, "completion_tokens_details")
+	assert.JSONEq(t, `{"reasoning_tokens":5,"accepted_prediction_tokens":0}`,
+		string(envelope.Usage["completion_tokens_details"]))
+}
+
+func TestWireCompat_Streaming_UsageDetailsPassthrough(t *testing.T) {
+	// With stream_options.include_usage, OpenAI sends a final chunk whose
+	// usage carries prompt_tokens_details. The gateway re-marshals every
+	// chunk, so this locks the streaming half of the passthrough.
+	frames := []string{
+		`data: {"id":"c2","object":"chat.completion.chunk","created":1,"model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}` + "\n\n",
+		`data: {"id":"c2","object":"chat.completion.chunk","created":1,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n",
+		`data: {"id":"c2","object":"chat.completion.chunk","created":1,"model":"gpt-4o","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":2,"total_tokens":102,"prompt_tokens_details":{"cached_tokens":64}}}` + "\n\n",
+		"data: [DONE]\n\n",
+	}
+	fx := newFixture(t,
+		func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			for _, f := range frames {
+				_, _ = io.WriteString(w, f)
+				if fl, ok := w.(http.Flusher); ok {
+					fl.Flush()
+				}
+			}
+		},
+		func(http.ResponseWriter, *http.Request) {},
+		func(http.ResponseWriter, *http.Request) {},
+	)
+	defer fx.Close()
+
+	status, _, raw := fx.post(t, "/v1/chat/completions", chatRequest("gpt-4o", true), true)
+	require.Equal(t, http.StatusOK, status)
+
+	// Find the frame that carries usage and verify details survived.
+	var sawDetails bool
+	for _, line := range strings.Split(string(raw), "\n") {
+		payload, ok := strings.CutPrefix(line, "data: ")
+		if !ok || payload == "[DONE]" {
+			continue
+		}
+		var chunk struct {
+			Usage map[string]json.RawMessage `json:"usage"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(payload), &chunk), "frame %q", payload)
+		if chunk.Usage == nil {
+			continue
+		}
+		require.Contains(t, chunk.Usage, "prompt_tokens_details",
+			"usage chunk must forward prompt_tokens_details verbatim")
+		assert.JSONEq(t, `{"cached_tokens":64}`, string(chunk.Usage["prompt_tokens_details"]))
+		sawDetails = true
+	}
+	assert.True(t, sawDetails, "no usage-bearing frame reached the client")
+}

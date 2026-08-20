@@ -5,6 +5,8 @@
 **高性能、可扩展的 LLM 推理网关**
 
 为使用多家 LLM 服务的团队提供统一接入层，解决成本、可靠性、可观测性三大痛点。
+[![CI](https://github.com/An-idd/x-beacon/actions/workflows/ci.yml/badge.svg)](https://github.com/An-idd/x-beacon/actions/workflows/ci.yml)
+[![Compat](https://github.com/An-idd/x-beacon/actions/workflows/compat.yml/badge.svg)](https://github.com/An-idd/x-beacon/actions/workflows/compat.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/An-idd/x-beacon)](https://goreportcard.com/report/github.com/An-idd/x-beacon)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/go-1.22%2B-00ADD8.svg)](https://golang.org)
@@ -25,25 +27,25 @@
 2. **成本失控**：重复的 prompt、无差别地使用最贵的模型、没有成本归因手段
 3. **生产可靠性不足**：单一供应商故障直接影响业务，缺少降级、重试、限流等基础能力
 
-**X-BEACON 在应用层和模型层之间提供一个统一的网关**，用一套 API 管理所有 LLM 调用，并通过语义缓存、智能路由、分布式限流等手段，让 AI 应用真正具备生产级可靠性。
+**X-BEACON 在应用层和模型层之间提供一个统一的网关**，用一套 API 管理所有 LLM 调用，并通过响应缓存、智能路由、限流熔断等手段，让 AI 应用真正具备生产级可靠性。
 
 ## 核心特性
 
 ### 🌐 统一 API 层
 
-- 兼容 OpenAI API 格式，现有代码几乎零改动即可接入
+- 兼容 OpenAI API 格式，现有代码几乎零改动即可接入；Anthropic SDK 走原生 `/v1/messages` 直通端点（thinking block 逐字节保真）
 - 开箱即用支持 OpenAI、Anthropic、DeepSeek、通义千问、豆包等主流提供商
 - 统一处理流式响应（SSE），屏蔽各家协议差异
 
 ### 🚀 高性能
 
-- 单机 **5000+ QPS**，P99 延迟 **<20ms**（不含模型响应时间）
+- 单机 **5000+ QPS**，P99 延迟 **<20ms**（不含模型响应时间，[可复现脚本与方法](docs/benchmarks.md)）
 - 基于 Go 的高并发实现，连接池 + 流式转发，内存占用 <500MB
 - 异步计费与日志写入，不阻塞请求主路径
 
 ### 💰 成本控制
 
-- **语义缓存**：基于 embedding 相似度的响应缓存，重复类查询成本降低 60%+
+- **精确缓存**：相同请求直接命中 Redis 缓存，零上游成本
 - **精确 token 计数**：内置 tokenizer，提供准确的成本统计（按 key、按用户、按模型）
 - **智能路由**：根据任务复杂度自动选择合适的模型，避免"杀鸡用牛刀"
 
@@ -62,14 +64,26 @@
 
 ## 快速开始
 
-### 通过 Docker Compose 启动（推荐）
+### 零依赖启动（推荐）
+
+网关默认是**无状态代理**，不需要 Postgres / Redis / Docker，一个二进制就能跑：
 
 ```bash
 git clone https://github.com/An-idd/x-beacon.git
 cd x-beacon
-cp configs/config.example.yaml configs/config.yaml
-# 编辑 config.yaml，填入你的 OpenAI / Anthropic API key
-docker-compose up -d
+cp configs/providers.example.yaml configs/providers.yaml
+# 编辑 providers.yaml，填入你的 OpenAI / Anthropic API key
+make dev   # 首次运行会自动生成 configs/config.yaml（含静态 API key）
+```
+
+### 可选：启用 Postgres / Redis
+
+需要 DB 管理 API key、请求日志与成本归因、响应缓存、跨实例限流时再加：
+
+```bash
+docker-compose up -d          # 启动 postgres + redis
+xbctl migrate up              # 建表
+# 然后在 config.yaml 里取消 database.dsn / redis.addr 的注释
 ```
 
 服务启动后访问：
@@ -83,7 +97,7 @@ docker-compose up -d
 ```bash
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer hs_test_key" \
+  -H "Authorization: Bearer sk-local-dev-change-me" \
   -d '{
     "model": "gpt-4o-mini",
     "messages": [{"role": "user", "content": "Hello, X-BEACON!"}]
@@ -97,7 +111,7 @@ from openai import OpenAI
 
 client = OpenAI(
     base_url="http://localhost:8080/v1",
-    api_key="hs_test_key"
+    api_key="sk-local-dev-change-me"
 )
 
 # 使用 Claude
@@ -220,23 +234,22 @@ latched 状态，并以 unix 时间戳后缀生成新 key（旧 key 不自动清
 | -------------------- | ------ | -------- | -------- | ----------------- |
 | 空请求（仅网关转发） | 8,200  | 1.2ms    | 4.8ms    | 不含模型响应      |
 | 精确缓存命中         | 12,500 | 0.8ms    | 3.2ms    | Redis 缓存        |
-| 语义缓存命中         | 3,800  | 4.5ms    | 15ms     | 含 embedding 计算 |
 | 限流检查             | 7,500  | 1.5ms    | 6ms      | 分布式限流        |
 
 与同类项目对比：
 
 
-| 项目         | 语言   | 空请求 P99 | 内存占用  | 语义缓存 |
-| ------------ | ------ | ---------- | --------- | -------- |
-| **X-BEACON** | **Go** | **4.8ms**  | **380MB** | **✅**   |
-| LiteLLM      | Python | ~80ms      | ~1.2GB    | ❌       |
-| OneAPI       | Go     | ~15ms      | ~500MB    | ❌       |
+| 项目         | 语言   | 空请求 P99 | 内存占用  |
+| ------------ | ------ | ---------- | --------- |
+| **X-BEACON** | **Go** | **4.8ms**  | **380MB** |
+| LiteLLM      | Python | ~80ms      | ~1.2GB    |
+| OneAPI       | Go     | ~15ms      | ~500MB    |
 
 完整基准测试方法和数据见 [benchmarks.md](docs/benchmarks.md)。
 
 ## 兼容性矩阵
 
-X-BEACON 把 OpenAI Chat Completions API 的 wire 格式做到字节级兼容,**只需把 `base_url` 指向网关即可**,客户端代码无需改动。下面是每次 PR 都跑的回归覆盖范围(见 `.github/workflows/compat.yml`):
+X-BEACON 把 OpenAI Chat Completions API 的 wire 格式做到字节级兼容,**只需把 `base_url` 指向网关即可**,客户端代码无需改动。字段级保真承诺(哪些字段保证透传、哪些字段网关会改写)见 [compatibility.md](docs/compatibility.md)。下面是每次 PR 都跑的回归覆盖范围(见 `.github/workflows/compat.yml`):
 
 ### L1 · Wire-level(纯 HTTP / cURL 视角)
 
@@ -247,6 +260,7 @@ X-BEACON 把 OpenAI Chat Completions API 的 wire 格式做到字节级兼容,**
 | 错误响应 envelope                   | OpenAI shape `{"error":{"type","code","message"}}` + 401 / 400 两条路径 |
 | `/v1/models` envelope               | `{"object":"list","data":[...]}` + 每条必备 `id` / `object` / `owned_by` |
 | tool_call 响应                      | `arguments` 必须保持 JSON 字符串(不被二次编码)|
+| usage token details                 | `prompt_tokens_details.cached_tokens` / `completion_tokens_details` 非流式 + 流式均原样透传 |
 
 ### L2 · OpenAI Python SDK(`openai>=1.55.0,<1.60.0`)
 
@@ -273,11 +287,7 @@ CI 上失败时 gateway / mockupstream 日志会被自动 dump。
 
 ## 使用案例
 
-### 案例 1：降低 LLM 调用成本
-
-某在线教育团队接入 X-BEACON 后，通过语义缓存将用户重复的"解题提问"命中率做到 38%，月度 OpenAI 账单降低 $4,200。
-
-### 案例 2：多供应商容灾
+### 多供应商容灾
 
 某客服系统接入 X-BEACON 的自动降级后，在 OpenAI 全球宕机的 2 小时内无缝切换到 Claude，业务零感知。
 
@@ -306,7 +316,6 @@ CI 上失败时 gateway / mockupstream 日志会被自动 dump。
 ### ✅ 已完成（v0.3 - 差异化亮点）
 
 - [X]  精确缓存（Redis sha256 key + 4 条防污染门槛）
-- [X]  语义缓存（RediSearch HNSW + per-model 索引隔离）
 - [X]  智能路由（规则引擎：token 数 + 关键词，A/B opt-out via scope）
 - [X]  Prompt 优化（system 永留 + 滑动窗口 + token 预算）
 
@@ -331,6 +340,7 @@ CI 上失败时 gateway / mockupstream 日志会被自动 dump。
 
 - [架构设计](docs/architecture.md) - 系统架构、关键决策、权衡分析
 - [性能基准](docs/benchmarks.md) - 压测方法与完整数据
+- [兼容性承诺](docs/compatibility.md) - 字段级 wire 保真承诺,CI 回归锁定
 - [运维手册](docs/runbook.md) - cache / 路由 / 压缩 / billing 常见运维动作
 - [部署指南](docs/deployment.md) - 生产环境部署最佳实践
 - [配置参考](docs/configuration.md) - 所有配置项说明
@@ -350,7 +360,7 @@ CI 上失败时 gateway / mockupstream 日志会被自动 dump。
 - [OneAPI](https://github.com/songquanpeng/one-api) - Go 实现的类似项目，国内使用较多
 - [Portkey](https://github.com/Portkey-AI/gateway) - 商业化的 AI 网关
 
-选择 X-BEACON 的理由：更好的性能、更强的生产就绪度、独有的语义缓存能力。详细对比见 [architecture.md](docs/architecture.md#与同类项目对比)。
+选择 X-BEACON 的理由：无状态轻量架构、更好的性能、更强的生产就绪度。详细对比见 [architecture.md](docs/architecture.md#与同类项目对比)。
 
 ## 协议
 

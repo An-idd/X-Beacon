@@ -117,3 +117,52 @@ func TestStreamEvent_ZeroValue(t *testing.T) {
 	assert.Nil(t, ev.Chunk)
 	assert.NoError(t, ev.Err)
 }
+
+func TestUsage_ExtraPassthrough(t *testing.T) {
+	// prompt_tokens_details.cached_tokens is how OpenAI reports prompt-
+	// cache hits; billing decisions downstream depend on seeing it, so
+	// the gateway must forward it verbatim (P1 compat fidelity).
+	input := []byte(`{
+		"prompt_tokens": 100,
+		"completion_tokens": 20,
+		"total_tokens": 120,
+		"prompt_tokens_details": {"cached_tokens": 80, "audio_tokens": 0},
+		"completion_tokens_details": {"reasoning_tokens": 5}
+	}`)
+	var u Usage
+	require.NoError(t, json.Unmarshal(input, &u))
+
+	assert.Equal(t, 100, u.PromptTokens)
+	assert.Equal(t, 20, u.CompletionTokens)
+	assert.Equal(t, 120, u.TotalTokens)
+	require.NotNil(t, u.Extra)
+	assert.Contains(t, u.Extra, "prompt_tokens_details")
+	assert.Contains(t, u.Extra, "completion_tokens_details")
+	assert.NotContains(t, u.Extra, "prompt_tokens")
+
+	out, err := json.Marshal(u)
+	require.NoError(t, err)
+
+	var reparsed map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(out, &reparsed))
+	assert.JSONEq(t, `{"cached_tokens": 80, "audio_tokens": 0}`, string(reparsed["prompt_tokens_details"]))
+	assert.JSONEq(t, `{"reasoning_tokens": 5}`, string(reparsed["completion_tokens_details"]))
+	assert.JSONEq(t, `100`, string(reparsed["prompt_tokens"]))
+}
+
+func TestUsage_ExtraCannotShadowKnown(t *testing.T) {
+	u := Usage{
+		PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15,
+		Extra: map[string]json.RawMessage{
+			"prompt_tokens": json.RawMessage(`999`),
+			"service_tier":  json.RawMessage(`"flex"`),
+		},
+	}
+	out, err := json.Marshal(u)
+	require.NoError(t, err)
+
+	var reparsed map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(out, &reparsed))
+	assert.JSONEq(t, `10`, string(reparsed["prompt_tokens"]))
+	assert.JSONEq(t, `"flex"`, string(reparsed["service_tier"]))
+}
