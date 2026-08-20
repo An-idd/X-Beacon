@@ -257,7 +257,7 @@ func New(deps Deps) (*Server, error) {
 			modelsPricing = deps.Pricing
 		}
 		v1.Get("/models", modelsHandler(deps.Registry, modelsPricing, deps.MetricsReg))
-		v1.Post("/chat/completions", chatCompletionsHandler(deps.Router, deps.Tokenizer, deps.Billing, deps.Metrics, deps.Cache, deps.CacheTTL, deps.Classifier, deps.Compressor, deps.Logger))
+		v1.Post("/chat/completions", chatCompletionsHandler(deps.Router, deps.Tokenizer, deps.Billing, deps.Metrics, deps.Cache, deps.CacheTTL, deps.Classifier, deps.Compressor, deps.RateLimiter, deps.Logger))
 		// Anthropic-native protocol. Verbatim passthrough to
 		// anthropic-type providers — see messagesHandler for why no
 		// cache/routing/compression layers apply here.

@@ -123,3 +123,74 @@ func TestKeyContext_ValueUnknown(t *testing.T) {
 	assert.Equal(t, "y", k.value(KeyByModel))
 	assert.Equal(t, "", k.value(KeyBy("ip"))) // future dim, currently unsupported
 }
+
+func TestMulti_UnitSplit(t *testing.T) {
+	// One requests-unit rule + one tokens-unit rule. Check must consult
+	// only the former; CheckTokens only the latter — so a request costs
+	// 1 request-credit and promptTok token-credits, never cross-charged.
+	reqRule := mustRule(t, RuleConfig{
+		Name: "rps", Algorithm: "memory_bucket", Rate: "2/s", Burst: 2,
+	})
+	tokRule := mustRule(t, RuleConfig{
+		Name: "tpm", Algorithm: "memory_bucket", Rate: "100/m", Burst: 100, Unit: "tokens",
+	})
+	m := NewMulti(reqRule, tokRule)
+
+	kctx := KeyContext{APIKeyID: "k1"}
+
+	// Two requests pass the rps rule; tokens untouched.
+	for i := 0; i < 2; i++ {
+		d, err := m.Check(context.Background(), kctx, 1)
+		require.NoError(t, err)
+		require.True(t, d.Allowed, "request %d", i)
+	}
+	// Third request denied by rps — CheckTokens must still allow, since
+	// the token bucket has consumed nothing yet.
+	d, err := m.Check(context.Background(), kctx, 1)
+	require.NoError(t, err)
+	assert.False(t, d.Allowed)
+	assert.Equal(t, "rps", d.Rule)
+
+	// 60-token charge passes; second 60-token charge exceeds the 100 burst.
+	d, err = m.CheckTokens(context.Background(), kctx, 60)
+	require.NoError(t, err)
+	assert.True(t, d.Allowed)
+	d, err = m.CheckTokens(context.Background(), kctx, 60)
+	require.NoError(t, err)
+	assert.False(t, d.Allowed)
+	assert.Equal(t, "tpm", d.Rule)
+}
+
+func TestMulti_CheckTokens_NoTokenRules_Allows(t *testing.T) {
+	reqRule := mustRule(t, RuleConfig{
+		Name: "rps", Algorithm: "memory_bucket", Rate: "1/s", Burst: 1,
+	})
+	m := NewMulti(reqRule)
+	d, err := m.CheckTokens(context.Background(), KeyContext{}, 99999)
+	require.NoError(t, err)
+	assert.True(t, d.Allowed, "no token rules → CheckTokens is a no-op allow")
+}
+
+func TestBuild_UnitValidation(t *testing.T) {
+	_, err := Build([]RuleConfig{{
+		Name: "bad", Algorithm: "memory_bucket", Rate: "1/s", Unit: "bananas",
+	}}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unit")
+
+	rules, err := Build([]RuleConfig{{
+		Name: "ok", Algorithm: "memory_bucket", Rate: "1/s", Unit: "tokens",
+	}}, nil)
+	require.NoError(t, err)
+	require.Len(t, rules, 1)
+	assert.Equal(t, UnitTokens, rules[0].Unit)
+}
+
+// mustRule builds a single rule via Build, failing the test on error.
+func mustRule(t *testing.T, rc RuleConfig) *Rule {
+	t.Helper()
+	rules, err := Build([]RuleConfig{rc}, nil)
+	require.NoError(t, err)
+	require.Len(t, rules, 1)
+	return rules[0]
+}

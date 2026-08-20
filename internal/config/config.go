@@ -223,6 +223,7 @@ type RateLimitRule struct {
 	Limit     int           `mapstructure:"limit"`     // redis_window
 	Burst     int           `mapstructure:"burst"`     // memory_bucket; 0 → defaults to int(Rate)
 	KeyBy     []string      `mapstructure:"key_by"`    // [] | [api_key] | [api_key, model]
+	Unit      string        `mapstructure:"unit"`      // requests (default) | tokens
 }
 
 // Load reads configuration from the given YAML file. An empty path loads

@@ -78,6 +78,17 @@ auth:
 # key_by composes the bucket key per rule. [] = global, ["api_key"] =
 # per-API-key, ["api_key","model"] = per-key-per-model. Allowed dims:
 # api_key, model.
+#
+# unit picks what the bucket counts: "requests" (default) or "tokens".
+# Token rules charge each request's PROMPT token count (completion
+# tokens are unknown pre-call) and are enforced after parsing, so the
+# model dimension works there. Example TPM rule:
+#   - name: per-key-tpm
+#     algorithm: memory_bucket
+#     unit: tokens
+#     rate: 100000/m
+#     burst: 20000        # largest single prompt allowed through
+#     key_by: [api_key, model]
 rate_limits: []
 # rate_limits:
 #   - name: global-rps

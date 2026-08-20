@@ -163,6 +163,7 @@ func buildRateLimiter(cfg *config.Config, rdb redis.UniversalClient, logger *zap
 			Limit:     r.Limit,
 			Burst:     r.Burst,
 			KeyBy:     r.KeyBy,
+			Unit:      r.Unit,
 		}
 	}
 	rules, err := ratelimit.Build(rcs, rdb)

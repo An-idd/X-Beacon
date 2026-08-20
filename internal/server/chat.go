@@ -3,8 +3,10 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -16,6 +18,7 @@ import (
 	"github.com/An-idd/x-beacon/internal/observability"
 	"github.com/An-idd/x-beacon/internal/prompt"
 	"github.com/An-idd/x-beacon/internal/provider"
+	"github.com/An-idd/x-beacon/internal/ratelimit"
 	"github.com/An-idd/x-beacon/internal/route"
 	"github.com/An-idd/x-beacon/internal/router"
 	"github.com/An-idd/x-beacon/internal/server/middleware"
@@ -50,7 +53,7 @@ const streamHeartbeatInterval = 15 * time.Second
 // tokenizer / billing may be nil; the handler degrades gracefully (no
 // token attribution / no billing rows) so dev-mode without DB still
 // boots and serves traffic.
-func chatCompletionsHandler(rtr *router.Router, tk *tokenizer.Selector, bill *billing.Worker, metrics *observability.Metrics, exactCache cache.Exact, cacheTTL time.Duration, classifier route.Classifier, compressor prompt.Compressor, logger *zap.Logger) http.HandlerFunc {
+func chatCompletionsHandler(rtr *router.Router, tk *tokenizer.Selector, bill *billing.Worker, metrics *observability.Metrics, exactCache cache.Exact, cacheTTL time.Duration, classifier route.Classifier, compressor prompt.Compressor, rl *ratelimit.Multi, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reqID := middleware.RequestIDFrom(r.Context())
 		started := time.Now()
@@ -135,6 +138,37 @@ func chatCompletionsHandler(rtr *router.Router, tk *tokenizer.Selector, bill *bi
 			}, reqID)
 			metrics.ObserveRequest("", req.Model, http.StatusBadRequest, time.Since(started).Seconds())
 			return
+		}
+
+		// Token-unit rate limits (post-parse: the middleware handles
+		// request-unit rules, but only here do we know the model and
+		// prompt size). Runs after classify+compress so the charged
+		// count matches what the upstream will actually receive.
+		// Fail-open on backend errors, mirroring the middleware policy.
+		//
+		// ponytail: prompt tokens only — completion tokens are unknown
+		// pre-call. Add post-response charging if TPM accuracy matters.
+		if rl != nil && rl.Len() > 0 && tk != nil {
+			kctx := ratelimit.KeyContext{APIKeyID: apiKeyIDFrom(r), Model: req.Model}
+			promptTok := tk.For(req.Model).CountMessages(req.Messages)
+			d, rlErr := rl.CheckTokens(r.Context(), kctx, promptTok)
+			if rlErr != nil {
+				logger.Warn("token ratelimit backend error; failing open",
+					zap.String("req_id", reqID), zap.Error(rlErr))
+			} else if !d.Allowed {
+				metrics.IncRatelimitReject(d.Rule)
+				if d.RetryAfter > 0 {
+					w.Header().Set("Retry-After", strconv.Itoa(int((d.RetryAfter+time.Second-1)/time.Second)))
+				}
+				writeError(w, mappedError{
+					Status:  http.StatusTooManyRequests,
+					Type:    "rate_limit_error",
+					Code:    "rate_limit_exceeded",
+					Message: fmt.Sprintf("Token rate limit exceeded for rule %q. Retry after %s.", d.Rule, d.RetryAfter.Round(time.Second)),
+				}, reqID)
+				metrics.ObserveRequest("", req.Model, http.StatusTooManyRequests, time.Since(started).Seconds())
+				return
+			}
 		}
 
 		if req.Stream {

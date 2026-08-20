@@ -39,6 +39,11 @@ type RuleConfig struct {
 	// KeyBy is the list of dimensions this rule keys on. Empty = global.
 	// Allowed values: "api_key", "model".
 	KeyBy []string
+
+	// Unit is what the bucket counts: "requests" (default) or "tokens".
+	// Token-unit rules charge the request's prompt-token count instead
+	// of 1, and are enforced post-parse in the chat handler.
+	Unit string
 }
 
 // Build translates a slice of RuleConfig into runtime Rules. All errors
@@ -73,6 +78,12 @@ func Build(configs []RuleConfig, rdb redis.UniversalClient) ([]*Rule, error) {
 			continue
 		}
 
+		unit, err := parseUnit(rc.Unit)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("rules[%d] %q: %w", i, rc.Name, err))
+			continue
+		}
+
 		var lim Limiter
 		switch rc.Algorithm {
 		case "memory_bucket":
@@ -87,13 +98,25 @@ func Build(configs []RuleConfig, rdb redis.UniversalClient) ([]*Rule, error) {
 			continue
 		}
 
-		out = append(out, &Rule{Name: rc.Name, KeyBy: kbs, Limiter: lim})
+		out = append(out, &Rule{Name: rc.Name, KeyBy: kbs, Limiter: lim, Unit: unit})
 	}
 
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("ratelimit: build failed: %w", errors.Join(errs...))
 	}
 	return out, nil
+}
+
+// parseUnit validates the rule's counting unit. Empty defaults to
+// requests for backward compatibility with pre-Unit configs.
+func parseUnit(s string) (Unit, error) {
+	switch s {
+	case "", string(UnitRequests):
+		return UnitRequests, nil
+	case string(UnitTokens):
+		return UnitTokens, nil
+	}
+	return "", fmt.Errorf("unknown unit %q (want requests | tokens | empty)", s)
 }
 
 // parseKeyBys validates and converts string dimensions into typed KeyBy

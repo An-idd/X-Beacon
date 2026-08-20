@@ -71,6 +71,17 @@ func (k KeyContext) value(dim KeyBy) string {
 	return ""
 }
 
+// Unit is what a rule's bucket counts: whole requests (default) or
+// prompt tokens. Request-unit rules are enforced by the middleware
+// (cost=1, pre-body); token-unit rules are enforced by the chat handler
+// after parse, where the tokenizer knows the prompt size.
+type Unit string
+
+const (
+	UnitRequests Unit = "requests"
+	UnitTokens   Unit = "tokens"
+)
+
 // Rule wraps a Limiter with the dimensions it keys on and a stable name.
 // composeKey produces the namespaced key passed to the Limiter so two
 // rules using the same Redis instance can't collide on the same KV.
@@ -78,6 +89,7 @@ type Rule struct {
 	Name    string
 	KeyBy   []KeyBy
 	Limiter Limiter
+	Unit    Unit // zero value treated as UnitRequests
 }
 
 // Allow composes the key from kctx and delegates to the Limiter. The
@@ -131,12 +143,31 @@ func (m *Multi) Len() int { return len(m.rules) }
 // callers gating on a Multi instance can simply skip the call when
 // Multi.Len() == 0.
 func (m *Multi) Check(ctx context.Context, kctx KeyContext, cost int) (Decision, error) {
+	return m.check(ctx, kctx, cost, UnitRequests)
+}
+
+// CheckTokens evaluates only the token-unit rules, charging n prompt
+// tokens against each. Called by the chat handler post-parse (the
+// middleware can't count tokens without buffering the body). No token
+// rules configured → allow, zero cost.
+func (m *Multi) CheckTokens(ctx context.Context, kctx KeyContext, n int) (Decision, error) {
+	return m.check(ctx, kctx, n, UnitTokens)
+}
+
+func (m *Multi) check(ctx context.Context, kctx KeyContext, cost int, unit Unit) (Decision, error) {
 	if len(m.rules) == 0 {
 		return Decision{Allowed: true}, nil
 	}
 
 	tightest := Decision{Allowed: true, Remaining: -1}
 	for _, r := range m.rules {
+		ru := r.Unit
+		if ru == "" {
+			ru = UnitRequests
+		}
+		if ru != unit {
+			continue
+		}
 		d, err := r.Allow(ctx, kctx, cost)
 		if err != nil {
 			return Decision{}, err
