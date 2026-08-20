@@ -124,13 +124,6 @@ type Deps struct {
 	// already short-circuit on a nil Cache).
 	CacheTTL time.Duration
 
-	// Semantic is the similarity-based response cache (Week 10).
-	// Optional — when nil, the chat handler skips the semantic
-	// pipeline entirely and only consults Cache. When non-nil, the
-	// chat handler queries Semantic on exact-miss and writes to it
-	// alongside Cache on successful upstream responses.
-	Semantic cache.Semantic
-
 	// Compressor is the prompt-truncation layer (Week 12). Optional —
 	// when nil, prompts pass through verbatim. When non-nil, the
 	// chat handler runs Compress *after* Classifier (so routing
@@ -264,7 +257,7 @@ func New(deps Deps) (*Server, error) {
 			modelsPricing = deps.Pricing
 		}
 		v1.Get("/models", modelsHandler(deps.Registry, modelsPricing, deps.MetricsReg))
-		v1.Post("/chat/completions", chatCompletionsHandler(deps.Router, deps.Tokenizer, deps.Billing, deps.Metrics, deps.Cache, deps.CacheTTL, deps.Semantic, deps.Classifier, deps.Compressor, deps.Logger))
+		v1.Post("/chat/completions", chatCompletionsHandler(deps.Router, deps.Tokenizer, deps.Billing, deps.Metrics, deps.Cache, deps.CacheTTL, deps.Classifier, deps.Compressor, deps.Logger))
 	})
 
 	// /admin/* umbrella. CORS sits here, BEFORE Auth, so browser

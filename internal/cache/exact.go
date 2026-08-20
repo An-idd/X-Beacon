@@ -1,8 +1,7 @@
 // Package cache holds the response-cache layer for /v1/chat/completions.
 //
-// Week 9 ships exact-match caching: identical (model, messages, sampling
-// params) → identical key → byte-equal cached response. Week 10 layers
-// semantic similarity on top.
+// Exact-match caching: identical (model, messages, sampling params) →
+// identical key → byte-equal cached response.
 //
 // Pollution prevention is the caller's job (see chat handler): only 200
 // responses with finish_reason=stop, non-empty content, and a usage

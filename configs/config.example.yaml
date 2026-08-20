@@ -19,14 +19,25 @@ observability:
     service_name: x-beacon
     sample_ratio: 0.1
 
+# Postgres and Redis are OPTIONAL. Left empty, the gateway runs as a
+# stateless proxy: static-key auth, in-memory rate limits, no cache, no
+# usage logging. That is the default and it needs zero infrastructure.
+#
+# Postgres buys you: DB-backed API keys (`xbctl keygen`), request_logs +
+# cost attribution, model pricing, audit log, the /admin/* console API.
+# Redis buys you: exact response cache, cross-instance rate limits
+# (algorithm: redis_window), the auth lookup cache.
+# Want them? `docker compose up -d`, `xbctl migrate up`, then uncomment.
 database:
-  dsn: "postgres://xbeacon:xbeacon@localhost:5432/xbeacon?sslmode=disable"
+  dsn: ""
+  # dsn: "postgres://xbeacon:xbeacon@localhost:5432/xbeacon?sslmode=disable"
   max_open_conns: 20
   max_idle_conns: 5
   conn_max_lifetime: 30m
 
 redis:
-  addr: "localhost:6379"
+  addr: ""
+  # addr: "localhost:6379"
   password: ""
   db: 0
   pool_size: 50
@@ -34,11 +45,17 @@ redis:
 # Provider configuration lives in configs/providers.yaml (loaded separately).
 providers_file: configs/providers.yaml
 
-# Authentication is backed by Postgres (api_keys table). To enable auth,
-# set database.dsn above and run `xbctl migrate up` once. If the database
-# is unreachable at startup, the gateway logs a warning and serves /v1/*
-# unauthenticated (dev-mode behavior).
+# Authentication. static_keys wins when present: keys live in this file,
+# no DB required. Remove the block to fall back to Postgres-backed keys
+# (api_keys table, `xbctl keygen`) — and note that with neither static
+# keys nor a reachable DB the gateway serves /v1/* UNAUTHENTICATED.
 auth:
+  static_keys:
+    - id: local-dev
+      name: "local dev key"
+      secret: sk-local-dev-change-me
+      scopes:
+        admin: ["webui"]
   cache:
     # Successful lookups are cached this long. 0 disables the cache layer
     # even when Redis is reachable.
@@ -163,34 +180,3 @@ cache:
   exact:
     enabled: true
     ttl: 1h
-  semantic:
-    # Off by default — enabling pulls in OpenAI embedding costs and a
-    # RediSearch index per model (~6 KiB per 1.5k-dim vector + HNSW
-    # graph overhead). Turn on once your prompt diversity is low enough
-    # that the cost vs. cache-hit math actually wins.
-    enabled: false
-    # Cosine similarity (NOT distance). 0.95 = "near-identical
-    # semantics"; lower values trade recall for false-positive risk.
-    threshold: 0.95
-    # Vector inputs / KNN ranker. Defaults match a typical OpenAI
-    # account; swap embedding_endpoint to point at Azure or a private
-    # gateway if needed.
-    embedding_model: text-embedding-3-small
-    embedding_endpoint: https://api.openai.com
-    # Falls back to $OPENAI_API_KEY if empty after env-expansion.
-    embedding_api_key: ${OPENAI_API_KEY:-}
-    # 0 = use the embedder's native dimension (1536 for the small
-    # model). Lower truncates the vector to save Redis index memory at
-    # the cost of recall.
-    embedding_dimensions: 0
-    # KNN candidate count per lookup. K=1 is sufficient; larger leaves
-    # room for re-ranking experiments later.
-    top_k: 5
-    # Per-process LRU on flatten(text) → vector. Each entry ≈
-    # 4*dim+text bytes (~6 KiB at 1536 dim); 1024 ≈ 6 MiB.
-    query_lru_capacity: 1024
-    # Per-model RediSearch IndexName prefix. Decision 2 (Phase 3):
-    # one index per model for true cross-model isolation. Drop a
-    # model's cache via:
-    #   FT.DROPINDEX <prefix><sanitized-model> DD
-    index_name_prefix: x_beacon_semcache_

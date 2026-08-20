@@ -42,7 +42,7 @@ type Metrics struct {
 	// model / api_key_id so per-tenant rollups need no joins.
 	costMicroTotal *prometheus.CounterVec
 
-	// cacheHitsTotal — exact / semantic (Week 9 fills these in;
+	// cacheHitsTotal — exact-cache hits (by type;
 	// declared now so dashboards don't break later).
 	cacheHitsTotal *prometheus.CounterVec
 
@@ -56,24 +56,6 @@ type Metrics struct {
 	// (hit|miss|error). Sub-millisecond expected; bucketing skews low
 	// because anything over 25 ms means Redis is the bottleneck.
 	cacheLookupDuration *prometheus.HistogramVec
-
-	// semanticSimilarity records the cosine similarity (0..1) of the
-	// best neighbor returned by the semantic cache. Observed on both
-	// hits and below-threshold misses so the threshold can be tuned
-	// from observed near-miss distributions.
-	semanticSimilarity prometheus.Histogram
-
-	// semanticThreshold mirrors the configured cosine-similarity
-	// threshold so dashboards can overlay "where the line is" against
-	// the similarity histogram. Set once at startup; updated via
-	// SetSemanticThreshold if a future feature reloads it.
-	semanticThreshold prometheus.Gauge
-
-	// semanticLookupDuration covers the embed + KNN round trip.
-	// Buckets skew higher than the exact-cache version because embed
-	// alone is ~50-200ms; the histogram makes "embed slow" vs "KNN
-	// slow" diagnosable when paired with cacheLookupDuration.
-	semanticLookupDuration *prometheus.HistogramVec
 
 	// routerDecisionTotal counts the requests that were actually
 	// rerouted by smart routing (Week 11). NOT a per-request counter —
@@ -164,14 +146,6 @@ var cacheLookupBuckets = []float64{
 	0.005, 0.01, 0.025, 0.1,
 }
 
-// semanticLookupBuckets covers embed + KNN. Embed alone is ~50-200ms
-// at the cheapest OpenAI model; KNN ~1-5ms in steady-state RediSearch.
-// The high bound (5s) catches embedder cold-starts and Redis swapping.
-var semanticLookupBuckets = []float64{
-	0.005, 0.01, 0.025, 0.05, 0.1,
-	0.25, 0.5, 1, 2.5, 5,
-}
-
 // NewMetrics constructs and registers the gateway metrics on reg.
 // Returns the bundle plus an error from MustRegister surfaced as a
 // regular error (so tests can fail cleanly instead of panicking).
@@ -200,35 +174,18 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 
 		cacheHitsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "gateway_cache_hits_total",
-			Help: "Cache hit count by type (exact|semantic). Populated in Week 9; declared now for dashboard stability.",
+			Help: "Cache hit count by type (exact).",
 		}, []string{"type"}),
 
 		cacheWritesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "gateway_cache_writes_total",
-			Help: "Successful cache Set() count by type (exact|semantic). Excludes responses filtered by the anti-pollution gate.",
+			Help: "Successful cache Set() count by type (exact). Excludes responses filtered by the anti-pollution gate.",
 		}, []string{"type"}),
 
 		cacheLookupDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "gateway_cache_lookup_duration_seconds",
 			Help:    "Cache Get() backend latency by result (hit|miss|error).",
 			Buckets: cacheLookupBuckets,
-		}, []string{"result"}),
-
-		semanticSimilarity: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name:    "gateway_cache_semantic_similarity",
-			Help:    "Cosine similarity (0..1) of the best neighbor on each semantic lookup; observed on both hits and below-threshold misses.",
-			Buckets: prometheus.LinearBuckets(0.5, 0.05, 11),
-		}),
-
-		semanticThreshold: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "gateway_cache_semantic_threshold",
-			Help: "Configured cosine-similarity threshold for semantic cache hits (0..1). Overlay against gateway_cache_semantic_similarity to see near-miss distribution vs. the cutoff.",
-		}),
-
-		semanticLookupDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "gateway_cache_semantic_lookup_duration_seconds",
-			Help:    "End-to-end latency of one semantic cache lookup (embed + KNN + threshold gate) by result (hit|miss|error).",
-			Buckets: semanticLookupBuckets,
 		}, []string{"result"}),
 
 		routerDecisionTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -289,8 +246,7 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 	collectors := []prometheus.Collector{
 		m.requestsTotal, m.requestDuration, m.tokensTotal,
 		m.costMicroTotal, m.cacheHitsTotal, m.cacheWritesTotal,
-		m.cacheLookupDuration, m.semanticSimilarity, m.semanticThreshold,
-		m.semanticLookupDuration, m.routerDecisionTotal, m.routerBypassTotal,
+		m.cacheLookupDuration, m.routerDecisionTotal, m.routerBypassTotal,
 		m.ratelimitRejectedTotal,
 		m.routerFailoverTotal, m.breakerState,
 		m.billingDroppedTotal, m.billingWrittenTotal, m.pricingCacheSize,
@@ -363,7 +319,7 @@ func (m *Metrics) AddCost(provider, model, apiKeyID string, micro int64) {
 	m.costMicroTotal.WithLabelValues(provider, model, apiKeyID).Add(float64(micro))
 }
 
-// IncCacheHit bumps the exact|semantic counter (Week 9 wires this).
+// IncCacheHit bumps the per-type cache-hit counter.
 func (m *Metrics) IncCacheHit(kind string) {
 	if m == nil {
 		return
@@ -389,38 +345,6 @@ func (m *Metrics) ObserveCacheLookup(result string, durationSec float64) {
 		return
 	}
 	m.cacheLookupDuration.WithLabelValues(result).Observe(durationSec)
-}
-
-// ObserveSemanticSimilarity records the cosine similarity of the best
-// neighbor seen on one semantic lookup. Skipped silently when
-// similarity == 0 (no candidates / empty index) — recording zeros
-// would skew the threshold-tuning view.
-func (m *Metrics) ObserveSemanticSimilarity(similarity float64) {
-	if m == nil || similarity <= 0 {
-		return
-	}
-	m.semanticSimilarity.Observe(similarity)
-}
-
-// SetSemanticThreshold publishes the configured similarity threshold
-// (0..1) so dashboards can overlay it against the similarity
-// histogram. Idempotent; called at startup and any time the
-// threshold is reloaded.
-func (m *Metrics) SetSemanticThreshold(threshold float64) {
-	if m == nil {
-		return
-	}
-	m.semanticThreshold.Set(threshold)
-}
-
-// ObserveSemanticLookup records the end-to-end latency of one
-// semantic cache lookup. result must be one of "hit", "miss", "error"
-// (matching the exact-cache lookup labels).
-func (m *Metrics) ObserveSemanticLookup(result string, durationSec float64) {
-	if m == nil {
-		return
-	}
-	m.semanticLookupDuration.WithLabelValues(result).Observe(durationSec)
 }
 
 // IncRouterDecision counts one actual reroute. Caller passes the

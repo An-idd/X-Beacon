@@ -26,7 +26,6 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, "info", cfg.Log.Level)
 	assert.True(t, cfg.Observability.Metrics.Enabled)
 	assert.False(t, cfg.Observability.Tracing.Enabled)
-	assert.InDelta(t, 0.95, cfg.Cache.Semantic.Threshold, 1e-9)
 }
 
 func TestLoad_YAMLOverrides(t *testing.T) {
@@ -125,21 +124,6 @@ log:
 	_, err := Load(path)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "log.level")
-}
-
-func TestValidate_SemanticCacheOutOfRange(t *testing.T) {
-	yaml := `
-cache:
-  semantic:
-    enabled: true
-    threshold: 1.5
-    top_k: 0
-`
-	path := writeTempYAML(t, yaml)
-	_, err := Load(path)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "threshold")
-	assert.Contains(t, err.Error(), "top_k")
 }
 
 func TestValidate_SampleRatioOutOfRange(t *testing.T) {

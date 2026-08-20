@@ -203,25 +203,12 @@ type RedisConfig struct {
 }
 
 type CacheConfig struct {
-	Exact    ExactCacheConfig    `mapstructure:"exact"`
-	Semantic SemanticCacheConfig `mapstructure:"semantic"`
+	Exact ExactCacheConfig `mapstructure:"exact"`
 }
 
 type ExactCacheConfig struct {
 	Enabled bool          `mapstructure:"enabled"`
 	TTL     time.Duration `mapstructure:"ttl"`
-}
-
-type SemanticCacheConfig struct {
-	Enabled            bool    `mapstructure:"enabled"`
-	Threshold          float64 `mapstructure:"threshold"`
-	EmbeddingModel     string  `mapstructure:"embedding_model"`
-	EmbeddingEndpoint  string  `mapstructure:"embedding_endpoint"`
-	EmbeddingAPIKey    string  `mapstructure:"embedding_api_key"`
-	EmbeddingDimensions int    `mapstructure:"embedding_dimensions"`
-	TopK               int     `mapstructure:"top_k"`
-	QueryLRUCapacity   int     `mapstructure:"query_lru_capacity"`
-	IndexNamePrefix    string  `mapstructure:"index_name_prefix"`
 }
 
 // RateLimitRule is one entry in `rate_limits:` of config.yaml. Mirrors
@@ -287,7 +274,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("database.max_idle_conns", 5)
 	v.SetDefault("database.conn_max_lifetime", 30*time.Minute)
 
-	v.SetDefault("redis.addr", "localhost:6379")
+	// ponytail: empty by default — the gateway is a stateless proxy unless
+	// you opt into Redis (cache / distributed rate-limit). Defaulting to
+	// localhost:6379 made every zero-config run dial a server nobody asked for.
+	v.SetDefault("redis.addr", "")
 	v.SetDefault("redis.pool_size", 50)
 
 	v.SetDefault("auth.cache.positive_ttl", 60*time.Second)
@@ -312,9 +302,6 @@ func setDefaults(v *viper.Viper) {
 
 	v.SetDefault("cache.exact.enabled", true)
 	v.SetDefault("cache.exact.ttl", time.Hour)
-	v.SetDefault("cache.semantic.threshold", 0.95)
-	v.SetDefault("cache.semantic.embedding_model", "text-embedding-3-small")
-	v.SetDefault("cache.semantic.top_k", 5)
 
 	v.SetDefault("prompt.compression.enabled", false)
 	v.SetDefault("prompt.compression.trigger_ratio", 0.8)
@@ -358,15 +345,6 @@ func (c *Config) Validate() error {
 	}
 	if r := c.Observability.Tracing.SampleRatio; r < 0 || r > 1 {
 		errs = append(errs, fmt.Errorf("observability.tracing.sample_ratio %v out of [0,1]", r))
-	}
-
-	if c.Cache.Semantic.Enabled {
-		if t := c.Cache.Semantic.Threshold; t <= 0 || t > 1 {
-			errs = append(errs, fmt.Errorf("cache.semantic.threshold %v out of (0,1]", t))
-		}
-		if c.Cache.Semantic.TopK <= 0 {
-			errs = append(errs, errors.New("cache.semantic.top_k must be > 0"))
-		}
 	}
 
 	if c.Prompt.Compression.Enabled {

@@ -162,9 +162,11 @@ ssh will@10.109.8.217 'echo "GET http://127.0.0.1:8080/healthz" | ~/xbeacon-benc
 
 ## Week 12 — Phase 3 full-stack acceptance (M3, procedure)
 
-**Goal**: confirm the Phase 3 layers (exact cache + semantic cache +
-smart routing + prompt compression) do not regress the Week 8 chat-path
-baseline.
+**Goal**: confirm the Phase 3 layers (exact cache + smart routing +
+prompt compression) do not regress the Week 8 chat-path baseline.
+
+> Note: semantic cache was removed in 2026-08; references below are
+> historical and pruned to the surviving layers.
 
 Acceptance: **P99 < 5 ms** on the empty-request path (`/healthz`) at
 5000 RPS sustained, AND chat-path P99 stays within ±25% of the Week 8
@@ -175,8 +177,7 @@ Acceptance: **P99 < 5 ms** on the empty-request path (`/healthz`) at
 1. Configure the gateway with every Phase 3 feature on:
    ```yaml
    cache:
-     exact:    { enabled: true,  ttl: 1h }
-     semantic: { enabled: true,  threshold: 0.95, top_k: 5 }
+     exact: { enabled: true, ttl: 1h }
    routing:
      enabled: true
      rules:
@@ -195,7 +196,7 @@ Acceptance: **P99 < 5 ms** on the empty-request path (`/healthz`) at
    cache hit ratio after warm-up. That's the cache-warm number.
 4. To measure cache-cold throughput, swap the bench body for one that
    varies a token per request (e.g. inject a uuid into the user
-   message). That blows past exact and exercises semantic + upstream.
+   message). That blows past exact and exercises the upstream path.
 
 ### Results
 
@@ -211,8 +212,6 @@ These metrics tell you which layer was actually exercised:
 
 - `gateway_cache_hits_total{type="exact"}` — should grow once per
   request in the warm phase.
-- `gateway_cache_hits_total{type="semantic"}` — only fires for the
-  semantic test variant.
 - `gateway_router_decision_total` — only fires when a routing rule
   fires; baseline body matches the `tiny-to-mini` rule above.
 - `gateway_prompt_compressed_total` — flat at zero for short bench
@@ -220,10 +219,3 @@ These metrics tell you which layer was actually exercised:
 
 ### Open items deferred to production rollout
 
-- **Semantic hit rate ≥ 30%**: requires a real embedder + an organic
-  workload (educational QA dataset proposed but not collected). Plan:
-  capture two weeks of post-launch traffic, replay against the cache
-  with `XBEACON_TEST_REDIS_STACK_ADDR` pointing at a scratch Redis,
-  measure `gateway_cache_hits_total{type="semantic"} / requests`. The
-  Week 8 mock embedder produces deterministic vectors, so a synthetic
-  hit-rate from this bench is meaningless.

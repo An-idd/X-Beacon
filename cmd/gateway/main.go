@@ -152,7 +152,6 @@ func runWithCtx(ctx context.Context, args []string, stdout *os.File) error {
 	}
 
 	exactCache, cacheTTL := buildExactCache(cfg, rdb, logger)
-	semanticCache := buildSemanticCache(cfg, rdb, metrics, logger)
 	classifier := buildClassifier(cfg, tk, logger)
 	compressor := buildCompressor(cfg, tk, logger)
 
@@ -181,7 +180,6 @@ func runWithCtx(ctx context.Context, args []string, stdout *os.File) error {
 		RateLimiter:       rateLimiter,
 		Cache:             exactCache,
 		CacheTTL:          cacheTTL,
-		Semantic:          semanticCache,
 		Classifier:        classifier,
 		Compressor:        compressor,
 		MetricsReg:        metricsReg,

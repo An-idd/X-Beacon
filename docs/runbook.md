@@ -42,48 +42,7 @@ cat /tmp/replay.jsonl | xargs -I{} curl -X POST http://localhost:8080/v1/chat/co
 
 ---
 
-## 2. 语义缓存（semantic cache）
-
-**模块**：`internal/cache/semantic.go` + RediSearch HNSW。
-
-### 2.1 阈值调整
-
-观察 `gateway_cache_semantic_similarity` histogram 与 `gateway_cache_semantic_threshold`
-gauge 的相对位置。如果 P50 命中相似度长期 ≥ 0.97 而阈值是 0.95，可以收紧：
-
-```yaml
-cache:
-  semantic:
-    threshold: 0.97  # was 0.95
-```
-
-收紧后下游误命中率下降；放宽则命中率上升、误命中风险上升。**每次只动 0.01–0.02**。
-
-### 2.2 删除 per-model 索引
-
-每个 model 一个 RediSearch 索引（`semanticCacheSelector`）。某个模型上线
-新版本想清空只属于它的语义条目：
-
-```bash
-# 列出所有索引
-redis-cli FT._LIST
-
-# 删某个 model 的索引（不删除 hash 数据，需要单独清）
-redis-cli FT.DROPINDEX cache:semantic:idx:gpt-4o-mini DD  # DD=delete docs
-```
-
-### 2.3 Embedding 上游故障
-
-`pkg/embedding/openai.go` 的错误归一化到 `provider.ErrUpstream`。
-日志会出现 `semantic cache write failed`；查询路径走 fail-open
-（miss 当作正常未命中）。无需立即处理，只需观察
-`gateway_cache_writes_total{type="semantic"}` 是否归零。
-
-如要强制语义缓存彻底关闭：`cache.semantic.enabled: false` + 重启。
-
----
-
-## 3. 智能路由（smart routing）
+## 2. 智能路由（smart routing）
 
 **模块**：`internal/route/rule_classifier.go`。
 
@@ -126,7 +85,7 @@ routing:
 
 ---
 
-## 3.5 Scope 列表（API key 权限）
+## 2.5 Scope 列表（API key 权限）
 
 API key 的 scope 是字符串元组 `category:value`（JSONB 存在 `api_keys.scopes`）。
 `xbctl keygen --scope cat:val` 签发；中间件用 `RequireScope(category, value)` 守路由。
@@ -151,7 +110,7 @@ API key 的 scope 是字符串元组 `category:value`（JSONB 存在 `api_keys.s
 
 ---
 
-## 4. Prompt 压缩（context truncation）
+## 3. Prompt 压缩（context truncation）
 
 **模块**：`internal/prompt/compressor.go`。
 
@@ -209,7 +168,7 @@ OTel trace 里搜 span name `prompt.compress`，attributes 含
 
 ---
 
-## 5. Billing / Pricing
+## 4. Billing / Pricing
 
 **模块**：`internal/billing/`，月度分区表 `request_logs`。
 
@@ -249,7 +208,7 @@ SELECT billing_create_partition_for_date(now() + interval '1 month');
 
 ---
 
-## 5.4 审计日志（admin_audit_logs）
+## 4.4 审计日志（admin_audit_logs）
 
 **模块**：`internal/audit`，表 `admin_audit_logs`（migration 000004）。
 
@@ -297,7 +256,7 @@ v0.2 加 retention 策略（建议 90d 滚动 DELETE，30 min batch）。
 
 ---
 
-## 6. 健康检查与 readiness
+## 5. 健康检查与 readiness
 
 - `/healthz` — 进程活着即返回 200。**不要**用作 LB 探针，否则 DB 挂掉时仍会派流量。
 - `/readyz` — 检查 DB + Redis 连通（1s 整体 deadline）。这个挂上 LB。
@@ -306,7 +265,7 @@ v0.2 加 retention 策略（建议 90d 滚动 DELETE，30 min batch）。
 
 ---
 
-## 7. 应急联系
+## 6. 应急联系
 
 > v0.4 之前没有正式 oncall，问题汇报到项目仓库 issue。
 

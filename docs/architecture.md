@@ -47,7 +47,7 @@ X-BEACON 的核心定位是 **LLM 推理网关（LLM Inference Gateway）**，�
 
 - ❌ **不做模型训练/微调**：只是推理层的网关
 - ❌ **不做 Agent 编排**：专注于 LLM 调用层，不涉及工具调用链路管理
-- ❌ **不做向量数据库**：语义缓存的向量存储复用 Redis 或外接向量库
+- ❌ **不做语义缓存**：embedding 相似度命中存在假阳性风险（错误答案直接返回），已于 2026-08 移除，只保留精确缓存
 - ❌ **不做完整的 LLMOps 平台**：聚焦网关职责，不承担 prompt 管理、数据标注等功能
 
 ---
@@ -99,7 +99,7 @@ X-BEACON 的核心定位是 **LLM 推理网关（LLM Inference Gateway）**，�
 | HTTP Server | 接收请求、返回响应 | 基于标准库 + chi，支持 SSE |
 | Middleware Chain | 横切关注点（认证、限流等） | 责任链模式，每个中间件独立可测 |
 | Provider Adapter | 对接各 LLM 提供商 | 统一接口，协议转换 |
-| Cache Layer | 精确缓存 + 语义缓存 | Redis + embedding 向量 |
+| Cache Layer | 精确缓存 | Redis sha256 key |
 | Router | 选择合适的 provider / model | 规则引擎 + 健康检查 |
 | Billing | Token 计数、成本计算 | 异步写入，不阻塞主路径 |
 | Observability | 指标、日志、追踪 | Prometheus + OTel + Zap |
@@ -198,7 +198,7 @@ Request
 [Prompt Compress] ← Week 12: 超过 80% context window 时裁剪历史
    │
    ▼
-[Cache Read]      ← 精确（sha256） → 语义（HNSW KNN + threshold）
+[Cache Read]      ← 精确（sha256）
    │
    ├── Hit ──────────────────────────────┐
    │                                     │
@@ -209,7 +209,7 @@ Request
 [Provider Call]   ← 调用 LLM 服务        │
    │                                     │
    ▼                                     │
-[Cache Write]     ← 写入精确 + 语义索引   │
+[Cache Write]     ← 写入精确缓存          │
    │                                     │
    ▼                                     │
 [Billing]         ← 异步记录成本         │
@@ -225,37 +225,19 @@ Response ◀──────────────────────�
 - Cache Hit 时直接短路返回，不走后续流程
 - Billing 通过 channel 异步处理，不阻塞响应
 
-### 3.3 语义缓存（差异化核心）
+### 3.3 语义缓存（已移除）
 
-语义缓存是本项目相较于同类方案的核心差异化。设计思路：
+早期版本（Week 10）实现过基于 embedding 相似度的语义缓存
+（RediSearch HNSW + 固定阈值 0.95）。2026-08 移除，原因：
 
-```
-┌──────────────────────────────────────────────────────────┐
-│                   Semantic Cache Flow                    │
-│                                                          │
-│  1. 请求到达                                             │
-│       │                                                  │
-│       ▼                                                  │
-│  2. 计算 prompt 的 embedding 向量                        │
-│       │                                                  │
-│       ▼                                                  │
-│  3. 在向量索引中查找 top-K 相似历史请求                   │
-│       │                                                  │
-│       ▼                                                  │
-│  4. 判断最相似请求的相似度是否 >= 阈值（默认 0.95）       │
-│       │                                                  │
-│       ├── Yes ──▶ 返回缓存响应                           │
-│       │                                                  │
-│       └── No ──▶ 调用 LLM，存储请求 + 响应 + 向量        │
-└──────────────────────────────────────────────────────────┘
-```
+- **假阳性即错误答案**：相似度命中直接返回缓存响应，阈值失准时
+  用户拿到的是另一个问题的答案，比 miss 昂贵得多
+- **固定全局阈值不可靠**：不同负载在嵌入空间中的分布密度差异大
+  （代码类密集、对话类稀疏），单一阈值无法同时适配
+- **依赖重**：需要 RediSearch 模块 + 外部 embedding API，与
+  "轻量无状态网关"的定位冲突
 
-**关键决策**：
-
-- **使用 HNSW 算法做 ANN 查询**：在精度和速度间取得好的平衡。初期可以直接用 Redis 的 RediSearch 模块，未来可以替换为专门的向量库（Qdrant、Milvus）
-- **Embedding 模型可配置**：默认使用 `text-embedding-3-small`（便宜），用户可切换
-- **相似度阈值可调**：默认 0.95 保证精确性，用户可以根据场景调整
-- **防止缓存污染**：对响应做基础质量检查（非空、非错误响应）后才入缓存
+只保留精确缓存（sha256 key，byte 级一致，无假阳性）。
 
 ### 3.4 限流设计
 
@@ -379,13 +361,8 @@ rate_limits:
 
 ### ADR-005：缓存应该放在 Gateway 还是独立服务？
 
-**背景**：语义缓存涉及 embedding 计算，逻辑较重。
-
-**决策**：内置在 Gateway，但保留拆分为独立服务的接口扩展点。
-
-**理由**：
-- **当前**：内置实现复杂度更低，延迟更短
-- **未来**：当缓存规模扩大（需要独立扩容）或需要跨 Gateway 共享缓存时，通过接口切换到远程缓存服务
+**决策**：精确缓存内置在 Gateway（Redis GET/SET 一次往返，无独立服务的价值）。
+曾考虑为语义缓存拆独立服务，语义缓存移除后该问题不再存在（见 3.3）。
 
 ### ADR-006：流式响应的实现方式
 
@@ -498,7 +475,7 @@ CREATE TABLE request_logs (
     cost_usd NUMERIC(10, 6),
     duration_ms INTEGER,
     cache_hit BOOLEAN DEFAULT false,
-    cache_type TEXT,                 -- 'exact' / 'semantic' / null
+    cache_type TEXT,                 -- 'exact' / null
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 ) PARTITION BY RANGE (created_at);
 
@@ -538,9 +515,6 @@ ratelimit:bucket:{key_hash}              → STRING (JSON)
 # 精确缓存
 cache:exact:{prompt_hash}                → STRING (JSON response)
 
-# 语义缓存的向量索引（RediSearch）
-cache:semantic                           → FT.CREATE idx
-
 # 实时成本（用于限额）
 cost:{api_key_id}:{window}               → STRING (number)
 
@@ -571,7 +545,7 @@ gateway_tokens_total{provider, model, type}   # type: prompt/completion
 gateway_cost_usd_total{provider, model, api_key}
 
 # 缓存
-gateway_cache_hits_total{type}                # type: exact/semantic
+gateway_cache_hits_total{type}                # type: exact
 gateway_cache_misses_total
 
 # 限流
@@ -688,7 +662,7 @@ spec:
 | 语言 | Go | Python | Go | TypeScript |
 | 性能（P99） | <5ms | ~80ms | ~15ms | ~10ms |
 | 内存占用 | 低 | 高 | 中 | 中 |
-| 语义缓存 | ✅ | ❌ | ❌ | ✅（商业版） |
+| 无状态零依赖启动 | ✅ | ❌（PG+Redis） | ❌（MySQL） | ✅ |
 | 可观测性 | 完整 | 基础 | 基础 | 完整 |
 | 开源协议 | Apache 2.0 | MIT | MIT | 部分开源 |
 | 社区 | 起步中 | 活跃 | 活跃（中文） | 商业主导 |

@@ -16,38 +16,17 @@ type CacheStats struct {
 	Since  time.Time `json:"since"`
 	AsOf   time.Time `json:"as_of"`
 
-	Exact    CacheLayerStats        `json:"exact"`
-	Semantic SemanticCacheStats     `json:"semantic"`
+	Exact CacheLayerStats `json:"exact"`
 }
 
-// CacheLayerStats covers one of the two layers (exact or semantic
-// stripped of similarity-specific fields). HitRate is computed at
+// CacheLayerStats covers the exact cache layer. HitRate is computed at
 // the projection layer so the WebUI doesn't need to know the
 // "writes are the denominator" convention; nil when writes == 0
 // to make the empty-state explicit.
 type CacheLayerStats struct {
-	Hits     uint64   `json:"hits"`
-	Writes   uint64   `json:"writes"`
-	HitRate  *float64 `json:"hit_rate,omitempty"` // hits / (hits + writes - hits) … see comment
-}
-
-// SemanticCacheStats extends CacheLayerStats with the threshold
-// gauge + a coarse similarity histogram so the WebUI can overlay
-// "where the cutoff lives" against "what near-miss similarities
-// actually look like".
-type SemanticCacheStats struct {
-	CacheLayerStats
-	Threshold        float64           `json:"threshold"`
-	SimilarityBuckets []SimilarityBucket `json:"similarity_buckets"`
-}
-
-// SimilarityBucket is one entry of a coarse cumulative histogram.
-// Mirrors Prometheus's bucket semantics: `count` is the number of
-// samples ≤ `le`. The frontend turns this into a delta-bar mini
-// histogram by subtracting consecutive counts.
-type SimilarityBucket struct {
-	LE    float64 `json:"le"`
-	Count uint64  `json:"count"`
+	Hits    uint64   `json:"hits"`
+	Writes  uint64   `json:"writes"`
+	HitRate *float64 `json:"hit_rate,omitempty"` // hits / (hits + writes - hits) … see comment
 }
 
 // CacheStatsCollector projects cache metrics from a Prometheus
@@ -104,45 +83,21 @@ func (c *CacheStatsCollector) Stats() (*CacheStats, error) {
 		case "gateway_cache_hits_total":
 			for _, m := range f.GetMetric() {
 				v := uint64(m.GetCounter().GetValue())
-				switch labelValue(m, "type") {
-				case "exact":
+				if labelValue(m, "type") == "exact" {
 					out.Exact.Hits += v
-				case "semantic":
-					out.Semantic.Hits += v
 				}
 			}
 		case "gateway_cache_writes_total":
 			for _, m := range f.GetMetric() {
 				v := uint64(m.GetCounter().GetValue())
-				switch labelValue(m, "type") {
-				case "exact":
+				if labelValue(m, "type") == "exact" {
 					out.Exact.Writes += v
-				case "semantic":
-					out.Semantic.Writes += v
-				}
-			}
-		case "gateway_cache_semantic_threshold":
-			for _, m := range f.GetMetric() {
-				out.Semantic.Threshold = m.GetGauge().GetValue()
-			}
-		case "gateway_cache_semantic_similarity":
-			for _, m := range f.GetMetric() {
-				h := m.GetHistogram()
-				if h == nil {
-					continue
-				}
-				for _, b := range h.GetBucket() {
-					out.Semantic.SimilarityBuckets = append(out.Semantic.SimilarityBuckets, SimilarityBucket{
-						LE:    b.GetUpperBound(),
-						Count: b.GetCumulativeCount(),
-					})
 				}
 			}
 		}
 	}
 
 	out.Exact.HitRate = computeHitRate(out.Exact.Hits, out.Exact.Writes)
-	out.Semantic.HitRate = computeHitRate(out.Semantic.Hits, out.Semantic.Writes)
 
 	c.mu.Lock()
 	cp := out

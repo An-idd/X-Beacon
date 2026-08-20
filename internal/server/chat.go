@@ -50,7 +50,7 @@ const streamHeartbeatInterval = 15 * time.Second
 // tokenizer / billing may be nil; the handler degrades gracefully (no
 // token attribution / no billing rows) so dev-mode without DB still
 // boots and serves traffic.
-func chatCompletionsHandler(rtr *router.Router, tk *tokenizer.Selector, bill *billing.Worker, metrics *observability.Metrics, exactCache cache.Exact, cacheTTL time.Duration, semanticCache cache.Semantic, classifier route.Classifier, compressor prompt.Compressor, logger *zap.Logger) http.HandlerFunc {
+func chatCompletionsHandler(rtr *router.Router, tk *tokenizer.Selector, bill *billing.Worker, metrics *observability.Metrics, exactCache cache.Exact, cacheTTL time.Duration, classifier route.Classifier, compressor prompt.Compressor, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reqID := middleware.RequestIDFrom(r.Context())
 		started := time.Now()
@@ -183,47 +183,7 @@ func chatCompletionsHandler(rtr *router.Router, tk *tokenizer.Selector, bill *bi
 				w.Header().Set("X-X-Beacon-Cache", "miss")
 			}
 
-			// Stream-path semantic lookup (mirrors non-stream branch).
-			// Hit replays as synthetic SSE; miss falls through to
-			// upstream where handleChatStream's write-back also fires
-			// for the semantic layer.
-			if semanticCache != nil {
-				semStart := time.Now()
-				cached, similarity, semErr := semanticCache.Lookup(r.Context(), req)
-				semElapsed := time.Since(semStart).Seconds()
-				switch {
-				case semErr == nil:
-					metrics.ObserveSemanticLookup("hit", semElapsed)
-					w.Header().Set("X-X-Beacon-Cache", "hit")
-					w.Header().Set("X-X-Beacon-Cache-Layer", "semantic")
-					sw, sseErr := sse.New(w)
-					if sseErr != nil {
-						writeError(w, mappedError{
-							Status:  http.StatusInternalServerError,
-							Type:    "internal_error",
-							Message: "Server does not support streaming",
-						}, reqID)
-						return
-					}
-					replayCachedStream(sw, cached, reqID, logger)
-					metrics.IncCacheHit("semantic")
-					metrics.ObserveSemanticSimilarity(similarity)
-					metrics.ObserveRequest(cached.Provider, req.Model, http.StatusOK, time.Since(started).Seconds())
-					return
-				case errors.Is(semErr, cache.ErrMiss):
-					metrics.ObserveSemanticLookup("miss", semElapsed)
-					if similarity > 0 {
-						metrics.ObserveSemanticSimilarity(similarity)
-					}
-				default:
-					metrics.ObserveSemanticLookup("error", semElapsed)
-					logger.Warn("stream semantic lookup failed; treating as miss",
-						zap.String("req_id", reqID),
-						zap.String("model", req.Model),
-						zap.Error(semErr))
-				}
-			}
-			handleChatStream(w, r, rtr, tk, bill, metrics, exactCache, cacheTTL, streamCacheKey, semanticCache, req, started, logger, reqID)
+			handleChatStream(w, r, rtr, tk, bill, metrics, exactCache, cacheTTL, streamCacheKey, req, started, logger, reqID)
 			return
 		}
 
@@ -271,48 +231,6 @@ func chatCompletionsHandler(rtr *router.Router, tk *tokenizer.Selector, bill *bi
 				}
 			}
 			w.Header().Set("X-X-Beacon-Cache", "miss")
-		}
-
-		// Semantic cache lookup (Week 10): exact missed; try the
-		// similarity layer before paying the upstream call. Decision
-		// 6 / Option B: hits stay in semantic only — we do NOT promote
-		// them into exact (avoids cache amplification + lets threshold
-		// tuning take effect cleanly).
-		if semanticCache != nil {
-			semStart := time.Now()
-			cached, similarity, semErr := semanticCache.Lookup(r.Context(), req)
-			semElapsed := time.Since(semStart).Seconds()
-			switch {
-			case semErr == nil:
-				metrics.ObserveSemanticLookup("hit", semElapsed)
-				w.Header().Set("X-X-Beacon-Cache", "hit")
-				w.Header().Set("X-X-Beacon-Cache-Layer", "semantic")
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK)
-				if encErr := jsonEncode(w, cached); encErr != nil {
-					logger.Error("failed to encode semantic cached response",
-						zap.String("req_id", reqID),
-						zap.Error(encErr))
-				}
-				metrics.IncCacheHit("semantic")
-				metrics.ObserveSemanticSimilarity(similarity)
-				metrics.ObserveRequest(cached.Provider, req.Model, http.StatusOK, time.Since(started).Seconds())
-				return
-			case errors.Is(semErr, cache.ErrMiss):
-				metrics.ObserveSemanticLookup("miss", semElapsed)
-				// Below threshold or empty index — log similarity for
-				// near-miss tuning even though the request will go to
-				// the upstream.
-				if similarity > 0 {
-					metrics.ObserveSemanticSimilarity(similarity)
-				}
-			default:
-				metrics.ObserveSemanticLookup("error", semElapsed)
-				logger.Warn("semantic cache lookup failed; treating as miss",
-					zap.String("req_id", reqID),
-					zap.String("model", req.Model),
-					zap.Error(semErr))
-			}
 		}
 
 		resp, err := rtr.ChatCompletion(r.Context(), req)
@@ -363,22 +281,6 @@ func chatCompletionsHandler(rtr *router.Router, tk *tokenizer.Selector, bill *bi
 					zap.Error(err))
 			} else {
 				metrics.IncCacheWrite("exact")
-			}
-		}
-
-		// Semantic write-back (Week 10): only on responses that pass
-		// the same anti-pollution gate. Embed cost (~50-200ms) is paid
-		// after the response has already been flushed to the client,
-		// so it doesn't affect TTFB; it does keep the request goroutine
-		// alive longer, which the worker pool absorbs naturally.
-		if semanticCache != nil && shouldCacheResponse(resp, promptTok) {
-			if err := semanticCache.Insert(r.Context(), req, resp); err != nil {
-				logger.Warn("semantic cache write failed",
-					zap.String("req_id", reqID),
-					zap.String("model", req.Model),
-					zap.Error(err))
-			} else {
-				metrics.IncCacheWrite("semantic")
 			}
 		}
 

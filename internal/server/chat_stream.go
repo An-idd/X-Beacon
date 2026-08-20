@@ -41,7 +41,6 @@ func handleChatStream(
 	exactCache cache.Exact,
 	cacheTTL time.Duration,
 	cacheKey string,
-	semanticCache cache.Semantic,
 	req *provider.ChatRequest,
 	started time.Time,
 	logger *zap.Logger,
@@ -155,16 +154,6 @@ func handleChatStream(
 						zap.Error(err))
 				} else {
 					metrics.IncCacheWrite("exact")
-				}
-			}
-			if semanticCache != nil {
-				if err := semanticCache.Insert(r.Context(), req, cacheable); err != nil {
-					logger.Warn("stream semantic cache write failed",
-						zap.String("req_id", reqID),
-						zap.String("model", req.Model),
-						zap.Error(err))
-				} else {
-					metrics.IncCacheWrite("semantic")
 				}
 			}
 		}

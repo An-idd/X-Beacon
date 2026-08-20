@@ -22,7 +22,6 @@ import (
 	"github.com/An-idd/x-beacon/internal/router"
 	"github.com/An-idd/x-beacon/internal/server"
 	"github.com/An-idd/x-beacon/internal/storage"
-	"github.com/An-idd/x-beacon/pkg/embedding"
 	"github.com/An-idd/x-beacon/pkg/tokenizer"
 )
 
@@ -48,8 +47,7 @@ func buildTokenizer(logger *zap.Logger) (*tokenizer.Selector, error) {
 // events.
 func buildBilling(ctx context.Context, cfg *config.Config, pool *storage.Pool, metrics *observability.Metrics, logger *zap.Logger) (*billing.Worker, *billing.PricingCache, error) {
 	if pool == nil {
-		logger.Warn("DB not configured; billing disabled",
-			zap.String("hint", "set database.dsn in config.yaml to enable request_logs + pricing"))
+		logger.Info("DB not configured; billing disabled")
 		return nil, nil, nil
 	}
 	pricing := billing.NewPricingCache(pool, logger)
@@ -109,8 +107,7 @@ func buildRouter(cfg *config.Config, reg *registry.Registry, metrics *observabil
 // fallback.
 func loadPool(ctx context.Context, cfg *config.Config, logger *zap.Logger) (*storage.Pool, error) {
 	if cfg.Database.DSN == "" {
-		logger.Warn("database.dsn is empty; gateway starts without a DB pool",
-			zap.String("hint", "set database.dsn in config.yaml to enable Postgres-backed auth"))
+		logger.Info("database.dsn is empty; running stateless (no DB-backed auth/billing/audit)")
 		return nil, nil
 	}
 	return storage.NewPool(ctx, storage.Config{
@@ -187,8 +184,7 @@ func buildRateLimiter(cfg *config.Config, rdb redis.UniversalClient, logger *zap
 // "cache is on" or "cache is off, here's why".
 func loadRedis(ctx context.Context, cfg *config.Config, logger *zap.Logger) *redis.Client {
 	if cfg.Redis.Addr == "" {
-		logger.Warn("redis.addr is empty; auth cache disabled",
-			zap.String("hint", "set redis.addr in config.yaml to enable caching"))
+		logger.Info("redis.addr is empty; running without cache / distributed rate limits")
 		return nil
 	}
 	client := redis.NewClient(&redis.Options{
@@ -236,97 +232,6 @@ func buildExactCache(cfg *config.Config, rdb *redis.Client, logger *zap.Logger) 
 		zap.Duration("ttl", ttl),
 	)
 	return cache.NewRedisExact(rdb), ttl
-}
-
-// buildSemanticCache assembles the Week 10 semantic cache layer:
-// OpenAI embedder → LRU wrapper → per-model SemanticSelector →
-// chat handler. Optional in three layered ways, mirroring
-// buildExactCache's policy:
-//
-//  1. cache.semantic.enabled = false → no semantic layer
-//  2. Redis unconfigured / unreachable → silent skip
-//  3. embedding API key missing (after env-expansion) → warn + skip
-//
-// The configured threshold is published to metrics on success so
-// dashboards can overlay "where the line is" against the similarity
-// histogram.
-func buildSemanticCache(cfg *config.Config, rdb *redis.Client, metrics *observability.Metrics, logger *zap.Logger) cache.Semantic {
-	sc := cfg.Cache.Semantic
-	if !sc.Enabled {
-		logger.Info("semantic cache disabled by config")
-		return nil
-	}
-	if rdb == nil {
-		logger.Warn("semantic cache requested but redis is unconfigured; cache disabled",
-			zap.String("hint", "set redis.addr in config.yaml"))
-		return nil
-	}
-	apiKey := os.ExpandEnv(sc.EmbeddingAPIKey)
-	if apiKey == "" {
-		// Fall back to OPENAI_API_KEY so operators don't need to
-		// duplicate the secret.
-		apiKey = os.Getenv("OPENAI_API_KEY")
-	}
-	if apiKey == "" {
-		logger.Warn("semantic cache enabled but no embedding API key found; cache disabled",
-			zap.String("hint", "set cache.semantic.embedding_api_key or OPENAI_API_KEY"))
-		return nil
-	}
-	openAI, err := embedding.NewOpenAI(embedding.OpenAIConfig{
-		APIKey:     apiKey,
-		Endpoint:   sc.EmbeddingEndpoint,
-		Model:      sc.EmbeddingModel,
-		Dimensions: sc.EmbeddingDimensions,
-	})
-	if err != nil {
-		logger.Warn("semantic cache: build openai embedder failed; cache disabled",
-			zap.Error(err))
-		return nil
-	}
-
-	var emb embedding.Embedder = openAI
-	lruCap := sc.QueryLRUCapacity
-	if lruCap <= 0 {
-		lruCap = 1024
-	}
-	wrapped, err := embedding.WithLRU(openAI, lruCap)
-	if err == nil {
-		emb = wrapped
-	} else {
-		logger.Warn("semantic cache: LRU wrap failed; using raw embedder",
-			zap.Error(err))
-	}
-
-	threshold := sc.Threshold
-	if threshold <= 0 || threshold > 1 {
-		threshold = 0.95
-	}
-	topK := sc.TopK
-	if topK <= 0 {
-		topK = 5
-	}
-	sel, err := cache.NewSemanticSelector(cache.SemanticSelectorConfig{
-		Redis:           rdb,
-		Embedder:        emb,
-		Threshold:       threshold,
-		TopK:            topK,
-		IndexNamePrefix: sc.IndexNamePrefix,
-	})
-	if err != nil {
-		logger.Warn("semantic cache: build selector failed; cache disabled",
-			zap.Error(err))
-		return nil
-	}
-
-	metrics.SetSemanticThreshold(threshold)
-	logger.Info("semantic cache ready",
-		zap.Float64("threshold", threshold),
-		zap.Int("top_k", topK),
-		zap.String("embedding_model", openAI.Model()),
-		zap.Int("dimensions", openAI.Dimensions()),
-		zap.Int("query_lru_capacity", lruCap),
-	)
-	return sel
 }
 
 // buildClassifier constructs the Week 11 smart-routing classifier
